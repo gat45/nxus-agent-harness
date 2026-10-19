@@ -855,6 +855,33 @@ class HarnessTestCase(unittest.TestCase):
         except PolicyDenied as exc:
             self.fail(f"jacobian_verify n'aurait pas dû être refusé par la policy : {exc}")
 
+    def test_t66_jacobian_verify_rejects_operation_id_shaped_like_a_cli_flag(self) -> None:
+        # [AJOUTE 20/10/2026 -- angle mort trouve par un agent : rea_inspect
+        # et smokinggun_scan ont chacun une validation dediee dans
+        # authorize() (allowlist de sous-commande, metacaracteres shell) ;
+        # jacobian_verify n'en avait AUCUNE -- operation_id/args_json
+        # tombaient directement sur la regle generique P-ALLOW-001, poussant
+        # toute la frontiere de securite sur l'analyseur d'arguments du
+        # binaire externe jacobian. Aucun exploit prouve contre le CLI
+        # jacobian installe, mais le meme filet de securite que les deux
+        # autres outils est gratuit et sans impact sur l'usage legitime
+        # (un vrai operation_id ne commence jamais par "-").
+        from nxus_harness.policy import PolicyEngine
+        contract = self._agentic_contract(allowed_paths=[], allowed_tools=["jacobian_verify"])
+        manifest = PlanManifest(
+            run_id="r", task_id="t", base_snapshot="x", allowed_paths=[],
+            operations=[PlannedOperation("op-1", "jacobian_verify",
+                                         {"operation_id": "--file", "args_json": "{}"}, RiskLevel.R0, "none")],
+            created_at=utc_now(), expires_at=utc_now(), plan_hash="x",
+        )
+        decision = PolicyEngine().authorize(
+            contract=contract, manifest=manifest, state=RunState.EXECUTING,
+            tool_id="jacobian_verify", arguments={"operation_id": "--file", "args_json": "{}"},
+            tool_risk=RiskLevel.R0,
+        )
+        self.assertEqual(decision.outcome, "deny")
+        self.assertEqual(decision.rule_id, "P-JAC-001")
+
     def test_t32_smokinggun_scan_rejects_target_outside_allowlist(self) -> None:
         contract = self._agentic_contract(allowed_paths=["src"], allowed_tools=["smokinggun_scan"])
         fake = _FakeAdapter({"operations": [

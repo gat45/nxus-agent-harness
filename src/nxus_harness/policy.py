@@ -53,6 +53,25 @@ def _has_shell_metacharacters(value: str) -> bool:
     return any(char in _SHELL_METACHARACTERS for char in value)
 
 
+# [AJOUTE 20/10/2026 -- angle mort trouve par un agent : rea_inspect
+# (P-REA-001/002/003) et smokinggun_scan (P-SCAN-001/002) ont chacun une
+# validation dediee dans authorize() ; jacobian_verify n'en avait AUCUNE --
+# operation_id/args_json tombaient directement sur la regle generique
+# P-ALLOW-001, poussant TOUTE la frontiere de securite sur l'analyseur
+# d'arguments du binaire externe jacobian (tools.py le justifie par
+# "fonctions mathematiques pures, pas des commandes shell", mais rien ne
+# garantit qu'un futur jacobian n'ajoute jamais une option exploitable via
+# ce point d'entree). Aucun exploit reel trouve contre le CLI jacobian
+# installe (Click bloque les formes testees), mais le gain est gratuit et
+# sans impact sur l'usage legitime : un operation_id reel (ex.
+# "abelian_group.element.equal.decide") ne commence jamais par "-" et ne
+# contient jamais de metacaractere shell -- meme filet de securite que les
+# deux autres outils, en ceinture-et-bretelles plutot qu'en reaction a un
+# exploit prouve.
+def _looks_like_cli_flag_injection(value: str) -> bool:
+    return value.startswith("-") or _has_shell_metacharacters(value)
+
+
 _REA_SAFE_SUBCOMMANDS = frozenset({
     "analyze", "inspect", "inspect-artifact", "inspect-binary-layout",
     "inspect-android-package", "inspect-android-class", "inspect-android-method",
@@ -261,6 +280,12 @@ class PolicyEngine:
                 return PolicyDecision("deny", "P-SCAN-001", "cible smokinggun hors périmètre autorisé")
             if _has_shell_metacharacters(target):
                 return PolicyDecision("deny", "P-SCAN-002", "cible smokinggun contient un métacaractère shell interdit")
+        if tool_id == "jacobian_verify":
+            operation_id = arguments.get("operation_id", "")
+            if not operation_id or _looks_like_cli_flag_injection(operation_id):
+                return PolicyDecision("deny", "P-JAC-001", "operation_id jacobian invalide ou ressemble à une option CLI")
+            if _has_shell_metacharacters(arguments.get("args_json", "")):
+                return PolicyDecision("deny", "P-JAC-002", "args_json jacobian contient un métacaractère shell interdit")
         return PolicyDecision("allow", "P-ALLOW-001", "opération conforme au contrat et au manifeste")
 
     @staticmethod
