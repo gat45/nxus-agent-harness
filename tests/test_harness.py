@@ -1162,5 +1162,47 @@ class HarnessTestCase(unittest.TestCase):
             server.shutdown()
 
 
+class MissionLoopTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie :
+    scripts/mission_loop.py ne rattrapait que (ValidationError, PolicyDenied)
+    autour de engine.submit() et de resume_run()+approve_and_run(). Une
+    exception d'un autre type (ex. TimeoutError, cas reel d'un llama-server
+    lent/inaccessible) remontait hors de run_mission() et arretait TOUT le
+    lot --stdin : les missions suivantes n'etaient jamais executees."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="nxus-mission-"))
+        import importlib.util
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "mission_loop.py"
+        spec = importlib.util.spec_from_file_location("mission_loop", script_path)
+        self.mission_loop = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mission_loop)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_t52_one_mission_unexpected_exception_does_not_abort_the_batch(self) -> None:
+        engine = HarnessEngine(self.root)
+        planner_ok = LlmPlanner(_FakeAdapter({
+            "operations": [{"operation_id": "op-1", "tool_id": "write_workspace_draft",
+                            "arguments": {"path": "output.txt", "content": "ok"}, "risk": 1, "verification": "draft_exists"},
+                           {"operation_id": "op-2", "tool_id": "run_declared_check",
+                            "arguments": {"check": "draft_exists"}, "risk": 0, "verification": "draft_exists"}]}))
+        planner_fails = LlmPlanner(_FakeAdapter({}, raises=TimeoutError("llama-server inaccessible")))
+
+        executed: list[int] = []
+        for index, planner in enumerate((planner_ok, planner_fails, planner_ok), start=1):
+            self.mission_loop.run_mission(
+                engine, planner, f"mission {index}", tenant_id="t-mission-loop",
+                allowed_paths=["output.txt"], allowed_urls=[], mission_index=index,
+            )
+            executed.append(index)
+
+        # Avant le correctif, la TimeoutError de la mission 2 remontait et
+        # l'appel pour la mission 3 n'aurait jamais ete atteint (le test
+        # lui-meme aurait echoue avec TimeoutError non rattrapee).
+        self.assertEqual(executed, [1, 2, 3])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

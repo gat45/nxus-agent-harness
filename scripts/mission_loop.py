@@ -46,6 +46,18 @@ def run_mission(engine: HarnessEngine, planner: LlmPlanner, objective: str, *,
     except (ValidationError, PolicyDenied) as exc:
         print(f"[REFUSE AVANT APPROBATION] {exc}")
         return
+    except Exception as exc:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie :
+        # engine.submit() peut lever d'autres exceptions (ex. TimeoutError
+        # si llama-server est lent/inaccessible) APRES avoir correctement
+        # marque le run ABORTED sur disque. Seul (ValidationError,
+        # PolicyDenied) etait rattrape ici, donc cette exception remontait
+        # hors de run_mission(), hors de la boucle `for` de main() --stdin,
+        # et arretait TOUT le lot : les missions suivantes n'etaient jamais
+        # executees. Verifie par repro reelle (planner factice levant
+        # TimeoutError sur la mission 1, missions 2 et 3 jamais executees).
+        print(f"[ECHEC INATTENDU AVANT APPROBATION] {type(exc).__name__}: {exc}")
+        return
 
     print(f"\n--- Plan propose par le modele (run {context.run_id}) ---")
     print((context.run_dir / "PLAN.md").read_text(encoding="utf-8"))
@@ -55,6 +67,9 @@ def run_mission(engine: HarnessEngine, planner: LlmPlanner, objective: str, *,
         completed = engine.approve_and_run(resumed, actor_id="mission-loop")
     except (ValidationError, PolicyDenied) as exc:
         print(f"[REFUSE A L'EXECUTION] {exc}")
+        return
+    except Exception as exc:
+        print(f"[ECHEC INATTENDU A L'EXECUTION] {type(exc).__name__}: {exc}")
         return
 
     print(f"\n--- Resultat : {completed.state.value} ---")
