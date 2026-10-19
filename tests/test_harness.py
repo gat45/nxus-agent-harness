@@ -15,7 +15,7 @@ from nxus_harness.approvals import ApprovalService
 from nxus_harness.audit import AuditLog
 from nxus_harness.engine import HarnessEngine
 from nxus_harness.evidence import EvidenceStore
-from nxus_harness.models import (Claim, PolicyDenied, RiskLevel, RunState, TaskContract,
+from nxus_harness.models import (Claim, PlanManifest, PlannedOperation, PolicyDenied, RiskLevel, RunState, TaskContract,
                                  TaskProfile, ValidationError, parse_utc, utc_now)
 from nxus_harness.llama_cpp_adapter import LlamaCppProfile
 from nxus_harness.llm_planner import LlmPlanner
@@ -723,6 +723,58 @@ class HarnessTestCase(unittest.TestCase):
         self.assertTrue(result["untrusted"])
         self.assertIn("error", result)  # example.invalid n'existe pas : erreur réseau propre, pas un crash
 
+    def test_t39_fetch_url_rechecks_dns_at_connection_time_not_just_at_policy_time(self) -> None:
+        # [AJOUTÉ 19/10/2026 — TOCTOU réel signalé par un audit externe]
+        # policy.py validait l'IP résolue AVANT d'autoriser l'opération,
+        # mais _execute() (tools.py) laissait ensuite urlopen() résoudre à
+        # nouveau le hostname pour la VRAIE connexion -- rien ne garantissait
+        # que c'était la même adresse qu'au moment de la validation (DNS à
+        # TTL court, "rebinding"). Simule exactement ce scénario : le DNS
+        # change ENTRE la validation (fait par le test, simulée publique) et
+        # l'exécution réelle (où le hostname résout maintenant en privé).
+        # _execute() doit refuser au moment de la connexion, pas seulement
+        # lors d'une validation antérieure qui pourrait être périmée.
+        import nxus_harness.policy as policy_module
+
+        contract = self._agentic_contract(allowed_urls=["http://rebind-at-execute.invalid/"])
+        gateway_policy = PolicyEngine()
+        # Simule la policy initiale voyant une IP publique (DNS pas encore rebind).
+        original_getaddrinfo = policy_module.socket.getaddrinfo
+        def public_then_private(host, *args, **kwargs):
+            if host == "rebind-at-execute.invalid":
+                return [(2, 1, 6, "", ("8.8.8.8", 0))]
+            return original_getaddrinfo(host, *args, **kwargs)
+        policy_module.socket.getaddrinfo = public_then_private
+        try:
+            decision = gateway_policy.authorize(
+                contract=contract, manifest=PlanManifest(
+                    run_id="r", task_id="t", base_snapshot="x", allowed_paths=[],
+                    allowed_urls=["http://rebind-at-execute.invalid/"],
+                    operations=[PlannedOperation("op-1", "fetch_url", {"url": "http://rebind-at-execute.invalid/"}, RiskLevel.R2, "none")],
+                    created_at="2026-01-01T00:00:00+00:00", expires_at="2026-01-01T00:10:00+00:00", plan_hash="h"),
+                state=RunState.EXECUTING, tool_id="fetch_url",
+                arguments={"url": "http://rebind-at-execute.invalid/"}, tool_risk=RiskLevel.R2)
+            self.assertEqual(decision.outcome, "allow", "la policy initiale devrait autoriser (IP publique simulée)")
+        finally:
+            policy_module.socket.getaddrinfo = original_getaddrinfo
+
+        # Au moment de l'exécution réelle, le DNS a maintenant rebind vers une IP privée.
+        def private_now(host, *args, **kwargs):
+            if host == "rebind-at-execute.invalid":
+                return [(2, 1, 6, "", ("127.0.0.1", 0))]
+            return original_getaddrinfo(host, *args, **kwargs)
+        policy_module.socket.getaddrinfo = private_now
+        try:
+            gateway = ToolGateway(workspace=self.root / "ws3", fixtures=self.root / "fixtures",
+                                  registry=ToolRegistry(), policy=PolicyEngine(),
+                                  approvals=ApprovalService(self.root / "approvals3.json"),
+                                  audit=AuditLog(self.root / "audit3.jsonl", run_id="r", tenant_id="t"))
+            result = gateway._execute("fetch_url", {"url": "http://rebind-at-execute.invalid/"}, budget_seconds=5)
+            self.assertIn("error", result)
+            self.assertIn("SSRF", result["error"])
+        finally:
+            policy_module.socket.getaddrinfo = original_getaddrinfo
+
     def test_t24_fetch_url_does_not_follow_redirect_to_private_host(self) -> None:
         # [AJOUTÉ 18/10/2026] Trouvé en documentant la checklist R2+ :
         # urlopen() suit les redirections par défaut. Un serveur local
@@ -744,6 +796,18 @@ class HarnessTestCase(unittest.TestCase):
         port = server.server_address[1]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        # [AJOUTÉ 19/10/2026] Ce test appelle _execute() DIRECTEMENT (hors du
+        # chemin policy.py normal) avec un vrai serveur de test en 127.0.0.1,
+        # pour isoler la défense anti-redirection elle-même. Le nouveau
+        # garde-fou TOCTOU (_execute() valide/épingle maintenant aussi l'IP
+        # résolue, en profondeur, comme policy.py) refuserait ce 127.0.0.1 de
+        # test AVANT même d'atteindre la redirection -- comportement correct
+        # en usage réel, mais qui empêcherait ce test d'isoler ce qu'il
+        # vérifie. On neutralise UNIQUEMENT la validation (pas le pinning),
+        # pour ce test, en simulant "déjà autorisé par ailleurs".
+        import nxus_harness.policy as policy_module
+        original_resolve = policy_module.resolve_public_ips
+        policy_module.resolve_public_ips = lambda host: set()
         try:
             gateway = ToolGateway(workspace=self.root / "ws2", fixtures=self.root / "fixtures",
                                   registry=ToolRegistry(), policy=PolicyEngine(),
@@ -753,6 +817,7 @@ class HarnessTestCase(unittest.TestCase):
             self.assertIn("error", result)
             self.assertIn("redirection", result["error"])
         finally:
+            policy_module.resolve_public_ips = original_resolve
             server.shutdown()
 
 

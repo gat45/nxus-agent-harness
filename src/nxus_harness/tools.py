@@ -363,17 +363,46 @@ class ToolGateway:
             # jamais cette destination, puisqu'elle ne voit que l'URL de
             # départ. _NoRedirect bloque toute redirection : l'appel échoue
             # proprement (capturé ci-dessous) plutôt que de la suivre.
+            # [CORRIGÉ 19/10/2026 — TOCTOU réel signalé par un audit externe]
+            # policy.py valide les IP résolues AVANT cet appel, mais
+            # urlopen() résout le hostname À NOUVEAU au moment de la vraie
+            # connexion (via socket.getaddrinfo interne) -- rien ne garantit
+            # que c'est la même adresse (DNS à TTL court, résolveur qui
+            # change de réponse). On revalide ET on épingle ICI, au point
+            # exact de connexion : socket.getaddrinfo est monkeypatché pour
+            # CETTE requête uniquement, forcé à ne renvoyer QUE les adresses
+            # déjà validées par resolve_public_ips -- le Host/SNI/vérification
+            # TLS restent sur le nom de domaine (inchangés), seule la
+            # résolution DNS sous-jacente est gelée sur un résultat déjà
+            # inspecté. Un hôte qui ne résout pas (fixtures de test type
+            # example.invalid) laisse getaddrinfo intact -- pas de SSRF
+            # possible sur un hôte qui ne résout nulle part.
+            import socket as socket_module
             from urllib.error import HTTPError
+            from urllib.parse import urlparse
             from urllib.request import HTTPRedirectHandler, build_opener
+            from .policy import resolve_public_ips
 
             class _NoRedirect(HTTPRedirectHandler):
                 def redirect_request(self, *args, **kwargs):
                     return None
 
             timeout = max(1, min(budget_seconds, 30))
+            host = urlparse(arguments["url"]).hostname or ""
+            try:
+                pinned_ips = resolve_public_ips(host)
+            except ValidationError as exc:
+                return {"url": arguments["url"], "error": f"garde SSRF (DNS rebinding) : {exc}", "untrusted": True}
+            original_getaddrinfo = socket_module.getaddrinfo
+            if pinned_ips:
+                def _pinned_getaddrinfo(requested_host, *args, **kwargs):
+                    if requested_host == host:
+                        return [info for info in original_getaddrinfo(requested_host, *args, **kwargs) if info[4][0] in pinned_ips]
+                    return original_getaddrinfo(requested_host, *args, **kwargs)
+                socket_module.getaddrinfo = _pinned_getaddrinfo
             opener = build_opener(_NoRedirect)
             try:
-                with opener.open(arguments["url"], timeout=timeout) as response:  # nosec B310: validé par policy.py, redirections bloquées
+                with opener.open(arguments["url"], timeout=timeout) as response:  # nosec B310: validé par policy.py + resolve_public_ips, résolution épinglée, redirections bloquées
                     raw = response.read(1_000_000)
                 content = raw.decode("utf-8", errors="replace")
                 return {"url": arguments["url"], "content": content, "truncated": len(raw) >= 1_000_000, "untrusted": True}
@@ -384,6 +413,8 @@ class ToolGateway:
                 return {"url": arguments["url"], "error": str(exc), "untrusted": True}
             except Exception as exc:
                 return {"url": arguments["url"], "error": str(exc), "untrusted": True}
+            finally:
+                socket_module.getaddrinfo = original_getaddrinfo
         if tool_id == "request_rea_analysis":
             # [AJOUTÉ 18/10/2026] Relais ASYNCHRONE : n'exécute rien, écrit
             # juste la demande pour qu'un humain/Claude la traite hors de ce

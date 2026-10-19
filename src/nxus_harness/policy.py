@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import ipaddress
 import socket
 
-from .models import PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContract, TaskProfile
+from .models import PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContract, TaskProfile, ValidationError
 
 # [AJOUTÉ 18/10/2026] Sous-commandes rea statiques/lecture seule uniquement
 # (confirmées via `rea --help` : jamais d'install, de debug interactif, de
@@ -16,6 +16,26 @@ from .models import PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContrac
 # allowlist courte plutôt qu'une blocklist : toute sous-commande RÉELLE de
 # rea absente de cette liste est refusée par défaut, y compris une future
 # sous-commande qu'une mise à jour de rea ajouterait.
+def resolve_public_ips(host: str) -> set[str]:
+    """[AJOUTÉ 19/10/2026 — extrait depuis authorize() pour que tools.py
+    puisse réutiliser EXACTEMENT la même logique de validation au moment
+    de la vraie connexion (voir fetch_url dans tools.py) -- une fonction
+    séparée qui ne ferait QUE revalider sans que la connexion soit forcée
+    vers l'adresse validée laisserait un TOCTOU : urllib résout à nouveau
+    au moment de connecter, et rien ne garantit que c'est la même adresse.
+    Lève ValidationError si une IP résolue n'est pas publique ; renvoie
+    l'ensemble des IP publiques résolues (vide si l'hôte ne résout pas)."""
+    try:
+        resolved_ips = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except socket.gaierror:
+        return set()
+    for ip in resolved_ips:
+        addr = ipaddress.ip_address(ip)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
+            raise ValidationError(f"hôte résolu vers une IP non publique ({ip}) — garde SSRF (DNS rebinding)")
+    return resolved_ips
+
+
 _REA_SAFE_SUBCOMMANDS = frozenset({
     "analyze", "inspect", "inspect-artifact", "inspect-binary-layout",
     "inspect-android-package", "inspect-android-class", "inspect-android-method",
@@ -170,18 +190,9 @@ class PolicyEngine:
             # profondeur : la chaîne reste vérifiée plus bas pour les hosts
             # qui ne résolvent pas (ex. déjà une IP littérale).
             try:
-                resolved_ips = {info[4][0] for info in socket.getaddrinfo(host, None)}
-            except socket.gaierror:
-                # Hôte qui ne résout pas : pas exploitable en SSRF (rien à
-                # atteindre), et des hôtes volontairement non résolvables
-                # (ex. example.invalid, RFC 2606) sont utilisés par les
-                # tests pour éviter tout accès réseau réel — laisser
-                # _execute gérer l'erreur réseau comme avant, ne pas refuser ici.
-                resolved_ips = set()
-            for ip in resolved_ips:
-                addr = ipaddress.ip_address(ip)
-                if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
-                    return PolicyDecision("deny", "P-URL-001", f"hôte résolu vers une IP non publique ({ip}) — garde SSRF (DNS rebinding)")
+                resolve_public_ips(host)
+            except ValidationError as exc:
+                return PolicyDecision("deny", "P-URL-001", str(exc))
             if (host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
                     or host.startswith("127.") or host.startswith("10.")
                     or host.startswith("192.168.") or host.startswith("169.254.")
