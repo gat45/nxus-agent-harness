@@ -588,6 +588,17 @@ class HarnessTestCase(unittest.TestCase):
         ]})
         with self.assertRaises(ValidationError):
             self.engine.run_with_llm(contract, LlmPlanner(fake))
+        # [AJOUTÉ 19/10/2026 — ENG-04, trouvé par un agent en comparant
+        # chaque RunState aux assertions réelles] plan() transitionne vers
+        # REFLECTION_REVIEW puis lève ValidationError SANS aucune autre
+        # transition -- contrairement à submit() (qui force ABORTED sur
+        # toute exception, voir engine.py), run_with_llm() n'a pas ce
+        # filet. Le run reste donc VRAIMENT au repos en REFLECTION_REVIEW,
+        # jamais vérifié avant que ce test ne lise state.json.
+        runs = list((self.engine.runs_root / contract.tenant_id).iterdir())
+        self.assertEqual(len(runs), 1)
+        state = json.loads((runs[0] / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state, "REFLECTION_REVIEW")
 
     def test_t27_stdout_matches_file_rejects_silent_crash_as_empty_vs_empty(self) -> None:
         # [AJOUTÉ 18/10/2026 — bug réel trouvé via une vraie mission
