@@ -378,7 +378,21 @@ class HarnessEngine:
     def _persist_state(context: RunContext) -> None:
         payload = {"run_id": context.run_id, "state": context.state.value, "updated_at": utc_now(),
                    "manifest_hash": context.manifest.manifest_hash if context.manifest else None}
-        (context.run_dir / "state.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # [AJOUTÉ 19/10/2026 — trouvé en vérifiant la famille de bugs de
+        # concurrence corrigée plus haut ce jour] write_text() n'est PAS
+        # atomique (ouvre, tronque, écrit, ferme) -- resume_run() (plus
+        # bas, aucun try/except autour de json.loads) pourrait lire ce
+        # fichier PENDANT une écriture et tomber sur un JSON tronqué. /live
+        # (view_runs.py) tolère déjà ce cas (except JSONDecodeError), mais
+        # resume_run() ne le faisait pas. Plutôt que rattraper l'erreur de
+        # lecture, on élimine la fenêtre de course : écrire dans un fichier
+        # temporaire puis os.replace() (atomique sur la même partition,
+        # POSIX et Windows) -- un lecteur concurrent voit soit l'ancien
+        # contenu complet, soit le nouveau complet, jamais un état intermédiaire.
+        state_path = context.run_dir / "state.json"
+        tmp_path = state_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp_path, state_path)
 
     @staticmethod
     def _write_progress(context: RunContext, *, done_count: int) -> None:
