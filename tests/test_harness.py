@@ -129,6 +129,43 @@ class HarnessTestCase(unittest.TestCase):
         outcomes = [proc.communicate(timeout=10)[0].strip() for proc in procs]
         self.assertEqual(outcomes.count("OK"), 1, f"le grant à usage unique a été consommé {outcomes.count('OK')} fois : {outcomes}")
 
+    def test_t47_revoke_all_does_not_lose_a_grant_issued_by_another_process(self) -> None:
+        # [AJOUTÉ 19/10/2026 — même famille de bug que test_t46, trouvée en
+        # relisant approvals.py après ce correctif] revoke_all() (kill
+        # switch) mutait une copie en mémoire potentiellement périmée.
+        # Reproduit avec deux process séparés : l'un émet un grant, l'autre
+        # (avec sa PROPRE instance ApprovalService construite AVANT cette
+        # émission) appelle revoke_all() -- sans le verrou+relecture, le
+        # grant émis par le premier process survivrait sur disque mais
+        # jamais marqué consumed=True, laissant une approbation valide
+        # échapper au kill switch.
+        import subprocess
+        import sys
+
+        src_dir = str(Path(__file__).resolve().parents[1] / "src")
+        store_path = self.root / "revoke_race.json"
+        # Construit DEUX ApprovalService séparés sur le même fichier VIDE
+        # (comme deux process qui démarrent en même temps), puis émet un
+        # grant via l'un et révoque via l'autre.
+        code = (
+            f"import sys; sys.path.insert(0, {src_dir!r})\n"
+            "from pathlib import Path\n"
+            "from nxus_harness.approvals import ApprovalService\n"
+            f"issuer = ApprovalService(Path({str(store_path)!r}))\n"
+            f"revoker = ApprovalService(Path({str(store_path)!r}))\n"  # instance séparée, vue vide au départ
+            "grant = issuer.issue(actor_id='op', run_id='r1', manifest_hash='m1', tool_id='execute_python', arguments={'code': 'print(1)'})\n"
+            "revoked_count = revoker.revoke_all()\n"
+            "print('revoked_count=', revoked_count)\n"
+            f"final = ApprovalService(Path({str(store_path)!r}))\n"
+            "stored = final._grants.get(grant.grant_id)\n"
+            "print('grant_survived=', stored is not None)\n"
+            "print('grant_consumed=', stored.consumed if stored else None)\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=15)
+        self.assertIn("grant_survived= True", result.stdout, f"stdout: {result.stdout}\nstderr: {result.stderr}")
+        self.assertIn("grant_consumed= True", result.stdout,
+                     "le grant a survécu sur disque mais n'a pas été révoqué -- le kill switch l'a manqué")
+
     def test_t46_concurrent_approve_and_run_does_not_double_execute(self) -> None:
         # [AJOUTÉ 19/10/2026 — REC-05 du cahier des charges, trouvé par un
         # agent puis REPRODUIT avec deux vrais process séparés. En

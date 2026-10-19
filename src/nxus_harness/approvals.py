@@ -117,10 +117,20 @@ class ApprovalService:
             return consumed
 
     def revoke_all(self) -> int:
-        changed = 0
-        for key, grant in list(self._grants.items()):
-            if not grant.consumed:
-                self._grants[key] = replace(grant, consumed=True)
-                changed += 1
-        self._save()
-        return changed
+        # [AJOUTÉ 19/10/2026 — même famille de bug que issue()/
+        # validate_and_consume() (ce même jour) : revoke_all() (appelé par
+        # le kill switch, PolicyEngine.abort()) mutait self._grants, une
+        # copie en mémoire potentiellement périmée, puis _save() écrasait
+        # le fichier avec SEULEMENT cette copie -- un grant émis par un
+        # AUTRE process entre la construction de cette instance et cet
+        # appel aurait disparu du disque sans jamais être révoqué.
+        with self._exclusive_lock():
+            if self.path.exists():
+                self._load()
+            changed = 0
+            for key, grant in list(self._grants.items()):
+                if not grant.consumed:
+                    self._grants[key] = replace(grant, consumed=True)
+                    changed += 1
+            self._save()
+            return changed
