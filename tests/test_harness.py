@@ -1760,5 +1760,73 @@ class ChatUiSecurityTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
 
 
+class ViewRunsLiveErrorSurfacingTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : _render_live() (view_runs.py) ignorait completement
+    event.get("details") pour chaque ligne d'audit -- un operateur
+    regardant /live apres un rejet (ValidationError/PolicyDenied, incluant
+    le nouveau plafond MAX_OPERATIONS_PER_PLAN) ne voyait que
+    "state_machine/abort_on_exception [allow]", sans AUCUNE indication du
+    pourquoi, alors qu'un commentaire du fichier affirmait le contraire.
+    Le CLI (mission_loop.py) affiche lui le message exact."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="nxus-liveerr-"))
+        (self.root / "fixtures").mkdir()
+        shutil.copy(Path(__file__).resolve().parents[1] / "fixtures" / "corpus.md",
+                   self.root / "fixtures" / "corpus.md")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_t68_live_page_surfaces_the_real_abort_reason(self) -> None:
+        engine = HarnessEngine(self.root)
+        contract = TaskContract(
+            task_id="t", tenant_id="tenant-liveerr", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.CODE_CHANGE, max_risk=RiskLevel.R1, allowed_tools=["write_workspace_draft"],
+        )
+
+        class _FailingPlanner:
+            def create(self, contract, run_id, run_dir):
+                raise ValidationError("le modele a propose 55 opérations, plafond 50 dépassé")
+
+        with self.assertRaises(ValidationError):
+            engine.submit(contract, planner=_FailingPlanner())
+        run_dirs = list((self.root / "runs" / "tenant-liveerr").iterdir())
+        self.assertEqual(len(run_dirs), 1)
+        state = json.loads((run_dirs[0] / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state, "ABORTED")
+
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "view_runs.py"
+        port = 8795
+        proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--port", str(port), "--root", str(self.root)],
+            cwd=str(script_path.parents[1]),
+            env={**__import__("os").environ, "PYTHONPATH": str(script_path.parents[1] / "src")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(1.0)
+            import socket
+            conn = socket.create_connection(("127.0.0.1", port), timeout=5)
+            conn.sendall(f"GET /live HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode())
+            conn.settimeout(5)
+            chunks = []
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            body = b"".join(chunks).decode("utf-8", errors="replace")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+        self.assertIn("plafond 50", body, "la raison reelle de l'abandon n'apparait pas sur /live")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

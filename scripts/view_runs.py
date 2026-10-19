@@ -228,10 +228,40 @@ class RunsHandler(BaseHTTPRequestHandler):
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # [AJOUTE 20/10/2026 -- angle mort trouve par un agent puis
+                # verifie en vrai : cette ligne ignorait completement
+                # event.get("details") -- un operateur regardant /live
+                # apres un rejet (ex. le nouveau plafond
+                # MAX_OPERATIONS_PER_PLAN de llm_planner.py, ou toute autre
+                # ValidationError/PolicyDenied) ne voyait que
+                # "state_machine/abort_on_exception [allow]", sans AUCUNE
+                # indication du pourquoi -- alors qu'un commentaire plus
+                # haut dans ce fichier affirmait ("le detail est deja
+                # visible... lu par /live"), ce qui etait faux. Le CLI
+                # (mission_loop.py) affiche lui le message exact a
+                # l'operateur. error_detail est deja dans audit.jsonl, lu
+                # ici -- juste jamais rendu avant ce correctif.
+                # [AJOUTE 20/10/2026 -- angle mort trouve par un agent puis
+                # verifie en vrai : cette ligne ignorait completement
+                # event.get("details") -- un operateur regardant /live
+                # apres un rejet (ex. le nouveau plafond
+                # MAX_OPERATIONS_PER_PLAN de llm_planner.py, ou toute autre
+                # ValidationError/PolicyDenied) ne voyait que
+                # "state_machine/abort_on_exception [allow]", sans AUCUNE
+                # indication du pourquoi -- alors qu'un commentaire plus
+                # haut dans ce fichier affirmait ("le detail est deja
+                # visible... lu par /live"), ce qui etait faux. Le CLI
+                # (mission_loop.py) affiche lui le message exact a
+                # l'operateur. error_detail est deja dans audit.jsonl, lu
+                # ici -- juste jamais rendu avant ce correctif.
+                details = event.get("details")
+                error_detail = ""
+                if isinstance(details, dict) and details.get("error"):
+                    error_detail = f" — <span class=\"err\">{html.escape(str(details['error']))}</span>"
                 recent_actions.append(
                     f"<li>{html.escape(event.get('timestamp', ''))} — "
                     f"<b>{html.escape(event.get('component', ''))}</b>/{html.escape(event.get('action', ''))} "
-                    f"[{html.escape(event.get('decision', ''))}]</li>"
+                    f"[{html.escape(event.get('decision', ''))}]{error_detail}</li>"
                 )
 
         # [AJOUTÉ 18/10/2026 — demandé : tokens/s] Mesure du SERVEUR
