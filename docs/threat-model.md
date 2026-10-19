@@ -59,3 +59,37 @@ Premiers connecteurs R2 du MVP, évalués contre la checklist ci-dessus.
 **Verdict** : accepté pour le MVP avec les limites ci-dessus explicitement documentées, pas comme un connecteur "complet" au sens de la checklist — en particulier l'absence de sandbox OS (point 4) reste la vraie lacune à combler avant tout usage au-delà d'une machine de confiance et d'un opérateur qui lit chaque plan avant d'approuver.
 
 Testé de bout en bout contre un `llama-server` réel : le modèle a proposé du code Python et une URL, un humain a approuvé dans un flux CLI séparé (`submit`/`approve`), le code s'est exécuté et a produit le résultat attendu, et la page récupérée est le contenu HTML réel de la page distante (`scripts/smoke_agentic_execution.py`).
+
+## Point d'entrée HTTP : POST /mission (scripts/view_runs.py, 19/10/2026)
+
+[AJOUTÉ 19/10/2026 — angle mort trouvé : ce fichier ne mentionnait jamais `/mission`
+ni `view_runs.py`, alors que `POST /mission` est un VRAI point d'entrée réseau qui
+soumet une mission complète (jusqu'à `AGENTIC_EXECUTION`, R2) au modèle local.
+
+1. **Propriétaire/version/provenance** : `scripts/view_runs.py`, stdlib `http.server`
+   uniquement, même moteur (`HarnessEngine`) que le flux CLI `submit`/`approve`.
+2. **Menace** : un client réseau non autorisé qui déclenche des missions, consomme
+   les ressources du modèle local et fait grossir l'espace de stockage des runs.
+   Signalé par un audit externe : aucune authentification HTTP n'existait.
+3. **Authentification (corrigée 19/10/2026)** : `--mission-token` optionnel (en-tête
+   `X-Mission-Token` ou champ de formulaire caché) ; **obligatoire** dès que `--host`
+   sort du loopback — le process refuse de démarrer sinon (`parser.error`, code 2).
+   Par défaut (`--host 127.0.0.1`, pas de jeton) : comportement inchangé, cohérent
+   avec le reste du MVP (confiance dans la machine locale, pas dans le réseau).
+4. **Pas de contournement de l'approbation** : `POST /mission` appelle `submit()`
+   (le même code que la CLI), qui s'arrête à `AWAITING_APPROVAL` avant toute
+   exécution — la mission web est auto-approuvée ensuite par le THREAD serveur
+   lui-même (`actor_id="live-page"`), pas par un humain qui relit `PLAN.md` comme
+   en CLI. C'est une différence de postue RÉELLE vis-à-vis du flux CLI, pas
+   seulement cosmétique : accepter de lancer `view_runs.py` avec `/mission` actif,
+   c'est accepter que CETTE instance se comporte en "opérateur automatique" —
+   PolicyEngine reste la vraie barrière (allowlist exacte, SSRF, kill switch),
+   pas une relecture humaine par mission.
+5. **Non couvert** : pas de limite de débit (rate limiting) ni de plafond de taille
+   du corps HTTP ; un verrou global (`_mission_lock`) sérialise déjà les missions
+   (une seule exécutée à la fois), ce qui limite de fait l'impact d'un flot de
+   requêtes mais ne le prévient pas explicitement.
+
+**Verdict** : accepté pour un usage local/loopback (comportement historique
+inchangé) ; l'exposition réseau au-delà du loopback nécessite maintenant
+`--mission-token` explicitement, refusé par défaut.
