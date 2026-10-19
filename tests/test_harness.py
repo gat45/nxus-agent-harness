@@ -420,6 +420,17 @@ class HarnessTestCase(unittest.TestCase):
             self.assertNotIn(secret, cleaned, f"secret non masque : {secret!r}")
             self.assertIn("[REDACTED]", cleaned)
 
+    def test_t50_resume_run_rejects_path_traversal_in_tenant_and_run_id(self) -> None:
+        # [AJOUTÉ 19/10/2026 — faille réelle trouvée par un agent, puis
+        # vérifiée en vrai en ligne de commande : resume_run()/create_run()
+        # construisaient `self.runs_root / tenant_id / run_id` SANS AUCUNE
+        # validation -- contrairement à memory.py qui avait déjà ce
+        # garde-fou mais jamais partagé. Preuve de l'agent : `approve
+        # "../outside" "secretdir" ...` sortait réellement de runs/.
+        for hostile_tenant, hostile_run in [("../outside", "secretdir"), ("tenant", "../../secret"), ("..", "x")]:
+            with self.assertRaises(ValidationError):
+                self.engine.resume_run(hostile_tenant, hostile_run)
+
     def test_t19_memory_is_isolated_per_tenant(self) -> None:
         self.engine.run_demo(self.contract(tenant="tenant-x"))
         self.assertEqual(len(self.engine.memory.recall("tenant-x")), 1)

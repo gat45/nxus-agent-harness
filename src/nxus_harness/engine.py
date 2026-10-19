@@ -15,7 +15,7 @@ from .audit import AuditLog
 from .evidence import EvidenceStore
 from .memory import MemoryStore
 from .models import (CheckStatus, Evidence, PlanManifest, RunState, TaskContract,
-                     ValidationError, VerificationResult, content_hash, utc_now)
+                     ValidationError, VerificationResult, content_hash, require_safe_identifier, utc_now)
 from .planner import ReflectionReview, SimulatedPlanner
 from .policy import PolicyEngine
 from .tools import ToolGateway, ToolRegistry
@@ -94,6 +94,13 @@ class HarnessEngine:
 
     def create_run(self, contract: TaskContract) -> RunContext:
         contract.validate()
+        # [AJOUTÉ 19/10/2026 — faille réelle trouvée par un agent, traversée
+        # de chemin] contract.tenant_id vient de l'appelant (CLI, API) et
+        # n'était jamais validé avant d'être utilisé dans un chemin disque
+        # -- un tenant_id comme "../outside" sortait réellement de runs/.
+        # run_id lui-même est toujours généré ici (uuid4), jamais fourni
+        # par l'appelant, donc pas besoin de le valider à la création.
+        require_safe_identifier(contract.tenant_id, label="tenant_id")
         run_id = f"run-{uuid4().hex[:12]}"
         run_dir = self.runs_root / contract.tenant_id / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -117,6 +124,13 @@ class HarnessEngine:
         rouverts (ils relisent leur fichier au constructeur) ; seule cette
         méthode manquait pour assembler un RunContext complet à partir de ça.
         """
+        # [AJOUTÉ 19/10/2026 — même faille que create_run() ci-dessus, ICI
+        # plus grave : tenant_id ET run_id viennent tous les deux
+        # directement de l'appelant (cli.py `approve <tenant> <run_id>`,
+        # ou la route web POST /mission) -- prouvé en vrai : un run_id
+        # comme "../../secret" construisait un chemin hors de runs/.
+        require_safe_identifier(tenant_id, label="tenant_id")
+        require_safe_identifier(run_id, label="run_id")
         run_dir = self.runs_root / tenant_id / run_id
         if not run_dir.is_dir():
             raise ValidationError(f"run introuvable : {tenant_id}/{run_id}")

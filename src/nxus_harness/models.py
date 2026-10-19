@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from enum import IntEnum, StrEnum
 from hashlib import sha256
 import json
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -107,6 +108,24 @@ def parse_utc(value: str) -> datetime:
 # comparaison codée en dur dans llm_planner.py, ce bug reviendrait en
 # silence. Une seule constante nommée, importée là où elle est comparée.
 DEFAULT_DESIRED_DRAFT = "Brouillon contrôlé par le harness."
+
+# [AJOUTÉ 19/10/2026 — faille réelle trouvée par un agent puis vérifiée en
+# vrai : resume_run() et create_run() (engine.py) construisaient des
+# chemins disque via `self.runs_root / tenant_id / run_id` SANS AUCUNE
+# validation de tenant_id/run_id -- contrairement à memory.py qui avait
+# déjà ce garde-fou (_SAFE_TENANT) mais seulement pour SES propres chemins,
+# jamais partagé. Prouvé : `approve "../outside" "secretdir" ...` construit
+# un chemin qui sort réellement de runs/. Centralisé ici (même leçon que
+# DEFAULT_DESIRED_DRAFT un peu plus haut : une regex dupliquée dans deux
+# fichiers finit par diverger) pour que memory.py ET engine.py utilisent
+# EXACTEMENT la même règle plutôt que deux copies qui pourraient un jour
+# ne plus correspondre.
+SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def require_safe_identifier(value: str, *, label: str) -> None:
+    if not SAFE_IDENTIFIER_PATTERN.match(value):
+        raise ValidationError(f"{label} invalide (caractères autorisés : lettres, chiffres, _.-)")
 
 
 @dataclass(frozen=True)

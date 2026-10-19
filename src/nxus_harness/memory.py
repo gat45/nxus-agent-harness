@@ -23,11 +23,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 import json
-import re
 
-from .models import parse_utc, utc_now
+from .models import SAFE_IDENTIFIER_PATTERN, parse_utc, utc_now
 
-_SAFE_TENANT = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_TENANT = SAFE_IDENTIFIER_PATTERN  # [MIS A JOUR 19/10/2026] centralisé dans models.py, voir ce fichier pour la raison
 
 
 @dataclass(frozen=True)
