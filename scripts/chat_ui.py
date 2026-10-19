@@ -93,6 +93,16 @@ class ChatHandler(BaseHTTPRequestHandler):
     base_url: str
     model: str
     timeout_seconds: int = 90
+    # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    # vrai (meme classe que view_runs.py, corrige le 19/10/2026) : HTTPServer
+    # ici est single-threaded, et rfile.read(length) bloque sans timeout
+    # jusqu'a recevoir `length` octets. Un client qui annonce un
+    # Content-Length enorme et retient le corps gele ce serveur pour TOUT
+    # LE MONDE (y compris l'operateur qui l'a lance) -- reproduit en vrai
+    # par un agent (socket brut, Content-Length: 999999999, GET / concurrent
+    # qui timeout). StreamRequestHandler.setup() applique cette valeur via
+    # connection.settimeout() avant chaque requete.
+    timeout = 10
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass
@@ -114,7 +124,16 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        # [AJOUTE 20/10/2026 -- voir le commentaire sur `timeout` ci-dessus]
+        # Un seul message de chat ne depasse jamais quelques Ko ; rejette le
+        # corps AVANT de le lire si le Content-Length declare depasse ce
+        # plafond large mais fini.
+        MAX_CHAT_BODY_BYTES = 65536
         length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_CHAT_BODY_BYTES:
+            self.send_response(413)
+            self.end_headers()
+            return
         try:
             incoming = json.loads(self.rfile.read(length).decode("utf-8"))
             messages = incoming["messages"]

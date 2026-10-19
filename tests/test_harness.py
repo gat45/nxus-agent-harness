@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -1590,6 +1591,61 @@ class CliSkepticalReviewWiringTests(unittest.TestCase):
         ])
         self.assertEqual(exit_code, 0)
         self.assertFalse((context.run_dir / "skeptical_review.txt").exists())
+
+
+class ChatUiSecurityTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai, meme classe que ViewRunsSecurityTests ci-dessus (corrige le
+    19/10/2026 pour view_runs.py) : scripts/chat_ui.py (ChatHandler.do_POST)
+    lisait self.rfile.read(length) avec un `length` pris tel quel dans
+    Content-Length, sans plafond ni timeout. HTTPServer y est
+    single-threaded : un client qui annonce un Content-Length enorme et
+    retient le corps gele le serveur pour TOUT LE MONDE, y compris
+    l'operateur qui l'a lance."""
+
+    def setUp(self) -> None:
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "chat_ui.py"
+        self.port = 8796
+        self.proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--model", "m", "--port", str(self.port)],
+            cwd=str(script_path.parents[1]),
+            env={**__import__("os").environ, "PYTHONPATH": str(script_path.parents[1] / "src")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
+
+    def tearDown(self) -> None:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+
+    def test_t63_huge_content_length_on_chat_is_rejected_without_starving_other_clients(self) -> None:
+        import socket
+        malicious = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        malicious.sendall(
+            (
+                "POST /api/chat HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                "Content-Length: 999999999\r\n"
+                "Content-Type: application/json\r\n"
+                "Connection: keep-alive\r\n\r\n"
+                '{"messages": []}'
+            ).encode("utf-8")
+        )
+        malicious.settimeout(5)
+        response = malicious.recv(4096)
+        self.assertIn(b"413", response.split(b"\r\n", 1)[0])
+
+        start = time.monotonic()
+        healthy = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        healthy.sendall(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nConnection: close\r\n\r\n".encode())
+        healthy.settimeout(5)
+        got = healthy.recv(4096)
+        elapsed = time.monotonic() - start
+        self.assertIn(b"200", got.split(b"\r\n", 1)[0])
+        self.assertLess(elapsed, 2.0)
 
 
 if __name__ == "__main__":
