@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 import json
-import os
 import re
-import time
 from uuid import uuid4
 
+from .locking import exclusive_file_lock
 from .models import ValidationError, canonical_json, content_hash, utc_now
 
 # Les motifs masquent les secrets de démonstration et les formes courantes.
@@ -98,22 +97,16 @@ class AuditLog:
         vraie alteration. Meme verrou portable O_CREAT|O_EXCL que
         approvals.py, mais ICI la relecture du tail depuis le disque se fait
         SOUS le verrou (pas seulement au __init__) pour que deux instances
-        ne partagent jamais un previous_hash perime."""
+        ne partagent jamais un previous_hash perime.
+
+        [MIS A JOUR 20/10/2026 -- meme faille de verrou perime que
+        approvals.py/engine.py (voir locking.py) : delegue maintenant a
+        locking.exclusive_file_lock(), partage entre les trois fichiers qui
+        dupliquaient ce motif."""
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        deadline = time.monotonic() + timeout_seconds
-        fd = None
-        while fd is None:
-            try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            except FileExistsError:
-                if time.monotonic() >= deadline:
-                    raise ValidationError("verrou d'audit indisponible (contention)")
-                time.sleep(0.02)
-        try:
+        with exclusive_file_lock(lock_path, timeout_seconds=timeout_seconds, on_timeout=ValidationError,
+                                 timeout_message="verrou d'audit indisponible (contention)"):
             yield
-        finally:
-            os.close(fd)
-            lock_path.unlink(missing_ok=True)
 
     def _tail_sidecar_path(self) -> Path:
         return self.path.with_suffix(self.path.suffix + ".tail")

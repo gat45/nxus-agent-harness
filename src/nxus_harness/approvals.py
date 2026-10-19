@@ -7,9 +7,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterator
 import json
-import os
-import time
 
+from .locking import exclusive_file_lock
 from .models import ApprovalGrant, PolicyDenied, ValidationError, content_hash, parse_utc, utc_now
 
 
@@ -44,22 +43,23 @@ class ApprovalService:
         externe) : création exclusive atomique d'un fichier `.lock` sibling
         via O_CREAT|O_EXCL, qui réussit sur EXACTEMENT un process à la fois
         sur Windows et POSIX ; les autres retentent avec un court backoff
-        jusqu'au timeout."""
+        jusqu'au timeout.
+
+        [MIS A JOUR 20/10/2026 -- faille reelle trouvee ET REPRODUITE par un
+        agent : ce verrou n'avait aucune detection de peremption -- un
+        process qui le tient puis meurt anormalement (crash, OOM kill)
+        avant son `finally: unlink` le laisse sur disque POUR TOUJOURS,
+        bloquant issue()/validate_and_consume()/revoke_all() en permanence
+        (10s puis PolicyDenied, a chaque appel suivant). Pire : revoke_all()
+        EST le coupe-circuit de securite (kill_switch) -- exactement le
+        controle qui doit marcher quand quelque chose a deja mal tourne.
+        Delegue maintenant a locking.exclusive_file_lock(), partage avec
+        engine.py et audit.py (meme motif, meme faille, maintenant corrigee
+        une seule fois plutot que trois)."""
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        deadline = time.monotonic() + timeout_seconds
-        fd = None
-        while fd is None:
-            try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            except FileExistsError:
-                if time.monotonic() >= deadline:
-                    raise PolicyDenied("verrou d'approbation indisponible (contention)")
-                time.sleep(0.02)
-        try:
+        with exclusive_file_lock(lock_path, timeout_seconds=timeout_seconds, on_timeout=PolicyDenied,
+                                 timeout_message="verrou d'approbation indisponible (contention)"):
             yield
-        finally:
-            os.close(fd)
-            lock_path.unlink(missing_ok=True)
 
     def issue(self, *, actor_id: str, run_id: str, manifest_hash: str, tool_id: str,
               arguments: dict[str, Any], ttl_seconds: int = 300) -> ApprovalGrant:

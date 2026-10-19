@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -143,6 +144,31 @@ class HarnessTestCase(unittest.TestCase):
         service.validate_and_consume(grant_id=grant.grant_id, actor_id="a", run_id="r", manifest_hash="m", tool_id="tool", arguments={"x": 1})
         with self.assertRaises(PolicyDenied):
             service.validate_and_consume(grant_id=grant.grant_id, actor_id="a", run_id="r", manifest_hash="m", tool_id="tool", arguments={"x": 1})
+
+    def test_t64_stale_lock_file_is_reclaimed_instead_of_bricking_approvals_forever(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : le verrou O_CREAT|O_EXCL n'avait aucune detection de
+        # peremption -- un process qui le tient puis meurt anormalement
+        # (crash, OOM kill) avant son `finally: unlink` le laisse sur
+        # disque POUR TOUJOURS, bloquant issue()/validate_and_consume()/
+        # revoke_all() EN PERMANENCE (chaque appel suivant brule le
+        # timeout complet puis leve PolicyDenied). Pire : revoke_all() EST
+        # le coupe-circuit de securite -- exactement le controle qui doit
+        # marcher quand quelque chose a deja mal tourne. Reproduit ici en
+        # simulant ce crash : fichier .lock cree manuellement, son mtime
+        # recule au-dela du seuil de peremption (locking.exclusive_file_lock,
+        # 60s par defaut).
+        path = self.root / "grants.json"
+        service = ApprovalService(path)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        lock_path.touch()
+        stale_time = time.time() - 120
+        os.utime(lock_path, (stale_time, stale_time))
+
+        grant = service.issue(actor_id="a", run_id="r", manifest_hash="m", tool_id="tool", arguments={"x": 1})
+        self.assertIsNotNone(grant)
+        revoked = service.revoke_all()
+        self.assertGreaterEqual(revoked, 0)
 
     def test_t05_grant_is_bound_to_exact_arguments(self) -> None:
         service = ApprovalService(self.root / "grants.json")

@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any, Iterator
 import json
 import os
-import time
 from uuid import uuid4
 
 from .approvals import ApprovalService
 from .audit import AuditLog
 from .evidence import EvidenceStore
+from .locking import exclusive_file_lock
 from .memory import MemoryStore
 from .models import (CheckStatus, Evidence, PlanManifest, RunState, TaskContract,
                      ValidationError, VerificationResult, content_hash, require_safe_identifier, utc_now)
@@ -37,22 +37,16 @@ def _run_exclusive_lock(run_dir: Path, *, timeout_seconds: float = 10.0) -> Iter
     fois). Même motif de verrou de fichier portable que ApprovalService
     (O_CREAT|O_EXCL atomique), mais ICI sur tout le cycle vérification
     d'état → émission des grants → transition, pas seulement l'écriture
-    d'un grant isolé."""
+    d'un grant isolé.
+
+    [MIS A JOUR 20/10/2026 -- meme faille de verrou perime que
+    approvals.py (voir locking.py) : delegue maintenant a
+    locking.exclusive_file_lock(), partage entre les trois fichiers qui
+    dupliquaient ce motif."""
     lock_path = run_dir / "run.lock"
-    deadline = time.monotonic() + timeout_seconds
-    fd = None
-    while fd is None:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise ValidationError("verrou de run indisponible (contention)")
-            time.sleep(0.02)
-    try:
+    with exclusive_file_lock(lock_path, timeout_seconds=timeout_seconds, on_timeout=ValidationError,
+                             timeout_message="verrou de run indisponible (contention)"):
         yield
-    finally:
-        os.close(fd)
-        lock_path.unlink(missing_ok=True)
 
 
 _ALLOWED_TRANSITIONS: dict[RunState, set[RunState]] = {
