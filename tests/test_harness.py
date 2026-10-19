@@ -248,6 +248,31 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual({entries[0].run_id, entries[1].run_id}, {first.run_id, second.run_id})
         self.assertEqual(entries[0].final_state, "COMPLETED")
 
+    def test_t43_memory_recall_excludes_expired_entries(self) -> None:
+        # [AJOUTÉ 19/10/2026 — axe 5 (mémoire) du cahier des charges, conçu
+        # par un agent après relecture de memory.py/_memory_context()]
+        # Reproduit le vrai problème déjà rencontré cette session (voir
+        # llm_planner.py, 18/10/2026) : un run ancien reste mélangé aux
+        # runs récents et peut être confondu avec la tâche actuelle, SANS
+        # AUCUN moyen de le faire sortir de la fenêtre sauf `limit` (un
+        # compte, pas une durée) -- un run vieux de 3 semaines occupe donc
+        # une place aussi légitimement qu'un run d'il y a 5 minutes s'il
+        # reste dans les `limit` derniers.
+        from nxus_harness.memory import MemoryStore
+        import tempfile
+        from pathlib import Path
+
+        store = MemoryStore(Path(tempfile.mkdtemp()))
+        store.record_run(run_id="old", tenant_id="tenant-ttl", task_id="t-old",
+                         objective="tache expiree", final_state="COMPLETED", tool_ids=[], ttl_days=-1)
+        store.record_run(run_id="fresh", tenant_id="tenant-ttl", task_id="t-fresh",
+                         objective="tache valide", final_state="COMPLETED", tool_ids=[], ttl_days=30)
+        store.record_run(run_id="forever", tenant_id="tenant-ttl", task_id="t-forever",
+                         objective="tache sans expiration", final_state="COMPLETED", tool_ids=[])
+        entries = store.recall("tenant-ttl")
+        run_ids = {entry.run_id for entry in entries}
+        self.assertEqual(run_ids, {"fresh", "forever"}, "l'entree expiree 'old' n'aurait jamais du etre rappelee")
+
     def test_t19_memory_is_isolated_per_tenant(self) -> None:
         self.engine.run_demo(self.contract(tenant="tenant-x"))
         self.assertEqual(len(self.engine.memory.recall("tenant-x")), 1)

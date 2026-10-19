@@ -19,12 +19,13 @@ n'accorde aucun droit et ne bypass aucun contrôle de policy.py.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 import json
 import re
 
-from .models import utc_now
+from .models import parse_utc, utc_now
 
 _SAFE_TENANT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -38,6 +39,21 @@ class MemoryEntry:
     final_state: str
     tool_ids: list[str]
     recorded_at: str
+    # [AJOUTÉ 19/10/2026 — axe 5 du cahier des charges (mémoire), conception
+    # revue par agent : le changement le moins cher qui a une vraie valeur
+    # n'est pas de scinder en 5 mémoires (épisodique/sémantique/procédurale/
+    # préférences/travail) -- il n'existe qu'un seul producteur
+    # (verify_and_complete()) et un seul consommateur (_memory_context())
+    # aujourd'hui, une taxonomie sans second consommateur serait
+    # spéculative. Le vrai manque concret déjà rencontré cette session (voir
+    # llm_planner.py, 18/10/2026) : un run vieux de plusieurs semaines reste
+    # mélangé aux runs récents sans aucune notion de péremption -- seul
+    # `limit` (un COMPTE, pas une durée) les faisait sortir de la fenêtre.
+    # Champs ADDITIFS avec défauts : les lignes .jsonl déjà écrites restent
+    # lisibles sans migration (dataclass + **kwargs tolère des clés
+    # manquantes si elles ont un défaut).
+    expires_at: str | None = None
+    confidence: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -54,8 +70,9 @@ class MemoryStore:
         return self.root / f"{tenant_id}.jsonl"
 
     def record_run(self, *, run_id: str, tenant_id: str, task_id: str, objective: str,
-                   final_state: str, tool_ids: list[str]) -> None:
-        entry = MemoryEntry(run_id, tenant_id, task_id, objective, final_state, tool_ids, utc_now())
+                   final_state: str, tool_ids: list[str], ttl_days: int | None = None) -> None:
+        expires_at = (parse_utc(utc_now()) + timedelta(days=ttl_days)).isoformat() if ttl_days is not None else None
+        entry = MemoryEntry(run_id, tenant_id, task_id, objective, final_state, tool_ids, utc_now(), expires_at)
         with self._path_for(tenant_id).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -64,5 +81,10 @@ class MemoryStore:
         if not path.is_file():
             return []
         lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
-        entries = [MemoryEntry(**json.loads(line)) for line in lines[-limit:]]
-        return entries
+        entries = [MemoryEntry(**json.loads(line)) for line in lines]
+        # [AJOUTÉ 19/10/2026] Filtré par péremption AVANT d'appliquer `limit`,
+        # sinon un vieux run expiré pourrait quand même occuper une place
+        # dans la fenêtre récente si peu de runs plus récents existent.
+        now = parse_utc(utc_now())
+        entries = [entry for entry in entries if entry.expires_at is None or parse_utc(entry.expires_at) > now]
+        return entries[-limit:]
