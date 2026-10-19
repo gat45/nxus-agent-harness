@@ -581,6 +581,29 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertIn("test unicode", result["stdout"])
 
+    def test_t38_execute_python_output_cap_kills_process_without_full_buffering(self) -> None:
+        # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
+        # subprocess.run(capture_output=True) capturait TOUT en mémoire
+        # avant notre troncature aux derniers N caractères -- un programme
+        # qui produit plusieurs Go de sortie épuisait la mémoire du harnais
+        # avant même le timeout. _run_capped lit en flux et tue le process
+        # dès que le plafond est dépassé. Vérifié ici qu'un programme qui
+        # tenterait d'écrire ~1 Go est arrêté quasi immédiatement (pas après
+        # le budget_seconds complet), avec une sortie bornée exactement au
+        # plafond, pas tronquée après coup.
+        contract = self._agentic_contract(budget_seconds=30, acceptance_criteria=["sortie plafonnée"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "execute_python", "arguments": {"code": "[print('A' * 10000) for _ in range(100000)]"}},
+        ]})
+        import time
+        t0 = time.monotonic()
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        elapsed = time.monotonic() - t0
+        result = context.results[0]["result"]
+        self.assertLessEqual(len(result["stdout"]), 8000)
+        self.assertFalse(result["timed_out"])
+        self.assertLess(elapsed, 10, "le process aurait dû être tué bien avant le budget complet")
+
     def test_t23_execute_python_timeout_is_enforced(self) -> None:
         contract = self._agentic_contract(budget_seconds=1, acceptance_criteria=["le script tourne"])
         fake = _FakeAdapter({"operations": [

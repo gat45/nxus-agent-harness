@@ -7,14 +7,71 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Thread
 from typing import Any
 import json
+import subprocess
 
 from .approvals import ApprovalService
 from .audit import AuditLog
 from .evidence import EvidenceStore
 from .models import Evidence, PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContract, ValidationError, content_hash
 from .policy import PolicyEngine
+
+
+def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, str] | None = None,
+                shell: bool = False, max_stdout: int = 8000, max_stderr: int = 4000) -> dict[str, Any]:
+    """[AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
+    subprocess.run(capture_output=True) capture la sortie EN ENTIER en
+    mémoire avant que notre code ne la tronque aux derniers N caractères --
+    un programme qui produit plusieurs Go de sortie épuise la mémoire du
+    process harnais avant même d'atteindre le timeout, qui ne borne que la
+    DURÉE, jamais la mémoire. Remplacé par une lecture en flux avec deux
+    threads lecteurs (un par descripteur, nécessaire car lire stdout et
+    stderr séquentiellement peut bloquer si l'un des deux tampons se
+    remplit pendant qu'on attend l'autre) : chaque thread s'arrête de lire
+    et le process est tué dès qu'un flux dépasse son plafond, AVANT que le
+    reste ne soit lu -- la mémoire réellement retenue par le harnais est
+    bornée, pas seulement le texte final affiché.
+    """
+    try:
+        proc = subprocess.Popen(args, cwd=cwd, env=env, shell=shell, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    except FileNotFoundError as exc:
+        return {"exit_code": None, "stdout": "", "stderr": "", "timed_out": False, "error": str(exc)}
+    buffers: dict[str, str] = {"stdout": "", "stderr": ""}
+    overflowed = {"stdout": False, "stderr": False}
+
+    def _drain(stream, key: str, cap: int) -> None:
+        try:
+            for chunk in iter(lambda: stream.read(4096), ""):
+                buffers[key] += chunk
+                if len(buffers[key]) > cap:
+                    buffers[key] = buffers[key][-cap:]
+                    overflowed[key] = True
+                    proc.kill()
+                    break
+        except Exception:
+            pass
+
+    readers = [Thread(target=_drain, args=(proc.stdout, "stdout", max_stdout), daemon=True),
+              Thread(target=_drain, args=(proc.stderr, "stderr", max_stderr), daemon=True)]
+    for reader in readers:
+        reader.start()
+    try:
+        proc.wait(timeout=timeout)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        timed_out = True
+    for reader in readers:
+        reader.join(timeout=5)
+    proc.stdout.close()
+    proc.stderr.close()
+    return {"exit_code": None if timed_out else proc.returncode, "stdout": buffers["stdout"],
+           "stderr": buffers["stderr"], "timed_out": timed_out,
+           "output_truncated": overflowed["stdout"] or overflowed["stderr"]}
 
 
 @dataclass(frozen=True)
@@ -283,30 +340,16 @@ class ToolGateway:
             # (grant lié au CODE littéral) est la vraie barrière ici, pas
             # cette sandbox.
             import os
-            import subprocess
             import sys
             timeout = max(1, min(budget_seconds, 60))
-            # [CORRIGÉ 18/10/2026 — bug réel reproduit par test_t33] Deux
-            # bugs distincts de la même famille : (1) notre décodage parent
-            # sans encoding= -> corrigé par encoding="utf-8" ci-dessous ;
-            # (2) le PROCESS ENFANT lui-même utilise cp1252 par défaut pour
-            # SA PROPRE sortie console sur Windows -> un print() affichant
-            # un caractère hors cp1252 plante DANS l'enfant (exit_code != 0,
-            # avant même que notre décodage parent n'entre en jeu). Corrigé
-            # en forçant PYTHONIOENCODING=utf-8 dans l'environnement du
-            # sous-processus, exactement comme pour jacobian_verify.
+            # [CORRIGÉ 18/10/2026 — bug réel reproduit par test_t33] le
+            # PROCESS ENFANT utilise cp1252 par défaut pour SA PROPRE sortie
+            # console sur Windows -> un print() affichant un caractère hors
+            # cp1252 plante DANS l'enfant. Corrigé en forçant
+            # PYTHONIOENCODING=utf-8 dans l'environnement du sous-processus.
             env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-            try:
-                proc = subprocess.run(
-                    [sys.executable, "-c", arguments["code"]],
-                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True,
-                    env=env, encoding="utf-8", errors="replace",
-                )
-                stdout = proc.stdout[-8000:]
-                stderr = proc.stderr[-4000:]
-                return {"exit_code": proc.returncode, "stdout": stdout, "stderr": stderr, "timed_out": False}
-            except subprocess.TimeoutExpired:
-                return {"exit_code": None, "stdout": "", "stderr": "", "timed_out": True}
+            return _run_capped([sys.executable, "-c", arguments["code"]], cwd=self.workspace,
+                               timeout=timeout, env=env, max_stdout=8000, max_stderr=4000)
         if tool_id == "fetch_url":
             # [AJOUTÉ 18/10/2026 — R2] PolicyEngine a déjà validé l'allowlist
             # exacte + la garde SSRF basique avant d'arriver ici (voir
@@ -360,38 +403,17 @@ class ToolGateway:
             # execute_python : le grant est lié au (sous-commande, cible)
             # EXACT proposé, jamais à "autoriser rea" en général.
             import os
-            import subprocess
             timeout = max(1, min(budget_seconds, 60))
-            try:
-                # [CORRIGÉ 18/10/2026 — bug réel reproduit : sur Windows, `rea`
-                # est un wrapper npm (rea.CMD, confirmé via `shutil.which`) --
-                # subprocess.run(["rea", ...]) sans shell=True échoue avec
-                # FileNotFoundError (WinError 2) car CreateProcess ne résout
-                # pas .CMD sans passer par cmd.exe. shell=True corrige ça ;
-                # limité à Windows (POSIX n'a pas ce problème et shell=True
-                # y a une sémantique différente et plus risquée avec une
-                # liste d'arguments). subcommand vient d'une allowlist fixe
-                # (aucun métacaractère possible) et target doit correspondre
-                # EXACTEMENT à une entrée allowed_paths pré-approuvée par
-                # l'opérateur (jamais un texte libre du modèle) — risque
-                # d'injection shell résiduel jugé acceptable pour ces deux
-                # contraintes, au même niveau que execute_python qui exécute
-                # déjà du code arbitraire sous le même grant.
-                proc = subprocess.run(
-                    ["rea", arguments["subcommand"], arguments["target"], "--json"],
-                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True,
-                    shell=(os.name == "nt"),
-                    encoding="utf-8", errors="replace",  # même bug que jacobian (cp1252 par défaut) : du texte APK décodé peut contenir n'importe quel caractère unicode
-                )
-                return {"subcommand": arguments["subcommand"], "target": arguments["target"],
-                       "exit_code": proc.returncode, "stdout": proc.stdout[-8000:],
-                       "stderr": proc.stderr[-2000:], "timed_out": False, "untrusted": True}
-            except subprocess.TimeoutExpired:
-                return {"subcommand": arguments["subcommand"], "target": arguments["target"],
-                       "exit_code": None, "stdout": "", "stderr": "", "timed_out": True, "untrusted": True}
-            except FileNotFoundError:
-                return {"subcommand": arguments["subcommand"], "target": arguments["target"],
-                       "error": "CLI rea introuvable (npm install --global rea-agents requis)", "untrusted": True}
+            # [CORRIGÉ 18/10/2026] sur Windows, `rea` est un wrapper npm
+            # (rea.CMD) -- shell=True requis pour le résoudre. subcommand
+            # vient d'une allowlist fixe (aucun métacaractère possible) et
+            # target doit correspondre EXACTEMENT à une entrée allowed_paths
+            # pré-approuvée par l'opérateur (jamais un texte libre du
+            # modèle) — risque d'injection shell résiduel jugé acceptable.
+            result = _run_capped(["rea", arguments["subcommand"], arguments["target"], "--json"],
+                                 cwd=self.workspace, timeout=timeout, shell=(os.name == "nt"),
+                                 max_stdout=8000, max_stderr=2000)
+            return {"subcommand": arguments["subcommand"], "target": arguments["target"], "untrusted": True, **result}
         if tool_id == "smokinggun_scan":
             # [AJOUTÉ 18/10/2026] Analyseur STATIQUE confirmé (morluto/
             # smokinggun, testé en vrai contre src/ de ce projet : 6 vraies
@@ -400,24 +422,11 @@ class ToolGateway:
             # vérifiée. shell=True sur Windows pour la même raison que
             # rea_inspect (wrapper npm .CMD).
             import os
-            import subprocess
             timeout = max(1, min(budget_seconds, 60))
-            try:
-                proc = subprocess.run(
-                    ["smokinggun", "scan", arguments["target"], "--format", "sarif"],
-                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True,
-                    shell=(os.name == "nt"),
-                    encoding="utf-8", errors="replace",  # même bug que jacobian (cp1252 par défaut)
-                )
-                return {"target": arguments["target"], "exit_code": proc.returncode,
-                       "stdout": proc.stdout[-8000:], "stderr": proc.stderr[-2000:],
-                       "timed_out": False, "untrusted": True}
-            except subprocess.TimeoutExpired:
-                return {"target": arguments["target"], "exit_code": None, "stdout": "", "stderr": "",
-                       "timed_out": True, "untrusted": True}
-            except FileNotFoundError:
-                return {"target": arguments["target"],
-                       "error": "CLI smokinggun introuvable (npm install -g smokinggun requis)", "untrusted": True}
+            result = _run_capped(["smokinggun", "scan", arguments["target"], "--format", "sarif"],
+                                 cwd=self.workspace, timeout=timeout, shell=(os.name == "nt"),
+                                 max_stdout=8000, max_stderr=2000)
+            return {"target": arguments["target"], "untrusted": True, **result}
         if tool_id == "jacobian_verify":
             # [AJOUTÉ 18/10/2026] venv dédié .venv-jacobian/ (Python 3.12,
             # install --only-binary=:all: -- jacobian ne supporte pas
@@ -428,33 +437,16 @@ class ToolGateway:
             # symbole mathématique (ex. ⊕) -- bug Windows réel reproduit en
             # testant `jacobian catalog`.
             import os
-            import subprocess
-            # [CORRIGÉ 18/10/2026 — bug réel trouvé en testant en vrai]
-            # self.fixtures.parent est le PROJECT_ROOT du moteur (voir
-            # HarnessEngine.__init__), qui vaut le dossier racine du run
-            # (ex. mission-workspace/) -- PAS la racine du dépôt
-            # nxus-agent-harness où vit .venv-jacobian/. Résoudre depuis ce
-            # fichier lui-même (src/nxus_harness/tools.py -> racine du
-            # dépôt) marche quel que soit le project_root passé par
-            # l'appelant.
+            # self.fixtures.parent est le PROJECT_ROOT du moteur (dossier du
+            # run), PAS la racine du dépôt où vit .venv-jacobian/ -- résolu
+            # depuis ce fichier lui-même.
             repo_root = Path(__file__).resolve().parents[2]
             jacobian_bin = repo_root / ".venv-jacobian" / "Scripts" / "jacobian.exe"
             if not jacobian_bin.is_file():
                 jacobian_bin = repo_root / ".venv-jacobian" / "bin" / "jacobian"
             timeout = max(1, min(budget_seconds, 30))
             env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-            try:
-                proc = subprocess.run(
-                    [str(jacobian_bin), "run", arguments["operation_id"], "--json", arguments["args_json"]],
-                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True, env=env,
-                    encoding="utf-8", errors="replace",  # décodage parent forcé en utf-8 (pas cp1252) -- même bug que PYTHONIOENCODING côté enfant ; replace plutôt que crash sur un octet malformé
-                )
-                return {"operation_id": arguments["operation_id"], "exit_code": proc.returncode,
-                       "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-2000:], "timed_out": False}
-            except subprocess.TimeoutExpired:
-                return {"operation_id": arguments["operation_id"], "exit_code": None,
-                       "stdout": "", "stderr": "", "timed_out": True}
-            except FileNotFoundError:
-                return {"operation_id": arguments["operation_id"],
-                       "error": "jacobian introuvable (.venv-jacobian/ absent -- voir docs d'installation)"}
+            result = _run_capped([str(jacobian_bin), "run", arguments["operation_id"], "--json", arguments["args_json"]],
+                                 cwd=self.workspace, timeout=timeout, env=env, max_stdout=4000, max_stderr=2000)
+            return {"operation_id": arguments["operation_id"], **result}
         raise PolicyDenied("implémentation d’outil absente")
