@@ -88,10 +88,52 @@ class HarnessTestCase(unittest.TestCase):
         with self.assertRaises(PolicyDenied):
             service.validate_and_consume(grant_id=grant.grant_id, actor_id="a", run_id="r", manifest_hash="m", tool_id="tool", arguments={"x": 2})
 
+    def test_t37_grant_consumption_is_atomic_across_processes(self) -> None:
+        # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe,
+        # puis REPRODUITE avec deux process Python séparés lancés en
+        # parallèle avant la correction : les deux obtenaient "OK" sur le
+        # même grant à usage unique, car chaque process ne voyait que sa
+        # propre copie en mémoire du fichier d'approbations. Un thread ne
+        # suffit PAS à reproduire ceci (le GIL sérialise), il faut de vrais
+        # process séparés -- c'est pourquoi ce test utilise subprocess,
+        # pas threading.
+        import subprocess
+        import sys
+
+        src_dir = str(Path(__file__).resolve().parents[1] / "src")
+        store_path = self.root / "race_grants.json"
+        setup_code = (
+            f"import sys; sys.path.insert(0, {src_dir!r})\n"
+            "from pathlib import Path\n"
+            "from nxus_harness.approvals import ApprovalService\n"
+            f"service = ApprovalService(Path({str(store_path)!r}))\n"
+            "grant = service.issue(actor_id='op', run_id='r1', manifest_hash='m1', tool_id='execute_python', arguments={'code': 'print(1)'})\n"
+            "print(grant.grant_id)\n"
+        )
+        grant_id = subprocess.run([sys.executable, "-c", setup_code], capture_output=True, text=True, timeout=10).stdout.strip()
+        self.assertTrue(grant_id, "échec de la préparation du grant")
+
+        consume_code = (
+            f"import sys, time; sys.path.insert(0, {src_dir!r})\n"
+            "from pathlib import Path\n"
+            "from nxus_harness.approvals import ApprovalService\n"
+            f"service = ApprovalService(Path({str(store_path)!r}))\n"
+            "time.sleep(0.05)\n"
+            "try:\n"
+            f"    service.validate_and_consume(grant_id={grant_id!r}, actor_id='op', run_id='r1', manifest_hash='m1', tool_id='execute_python', arguments={{'code': 'print(1)'}})\n"
+            "    print('OK')\n"
+            "except Exception:\n"
+            "    print('DENIED')\n"
+        )
+        procs = [subprocess.Popen([sys.executable, "-c", consume_code], stdout=subprocess.PIPE, text=True) for _ in range(8)]
+        outcomes = [proc.communicate(timeout=10)[0].strip() for proc in procs]
+        self.assertEqual(outcomes.count("OK"), 1, f"le grant à usage unique a été consommé {outcomes.count('OK')} fois : {outcomes}")
+
     def test_t05_expired_grant_is_refused(self) -> None:
         service = ApprovalService(self.root / "grants.json")
         grant = service.issue(actor_id="a", run_id="r", manifest_hash="m", tool_id="tool", arguments={"x": 1})
         service._grants[grant.grant_id] = replace(grant, expires_at=(parse_utc(utc_now()) - timedelta(seconds=1)).isoformat())
+        service._save()  # [AJOUTÉ 19/10/2026] validate_and_consume relit maintenant le disque sous verrou (voir approvals.py) ; une mutation en mémoire seule ne serait plus visible, comme sur le vrai disque.
         with self.assertRaises(PolicyDenied):
             service.validate_and_consume(grant_id=grant.grant_id, actor_id="a", run_id="r", manifest_hash="m", tool_id="tool", arguments={"x": 1})
 
