@@ -63,6 +63,37 @@ class HarnessTestCase(unittest.TestCase):
             desired_draft="# Brouillon\ncontenu sûr\n",
         )
 
+    def test_t51_plan_markdown_cannot_be_spoofed_via_objective_newlines(self) -> None:
+        # [AJOUTÉ 19/10/2026 — faille réelle trouvée par un agent puis
+        # VÉRIFIÉE en vrai (fichier PLAN.md réellement écrit et relu) :
+        # contract.objective/acceptance_criteria étaient interpolés dans
+        # PLAN.md sans échapper les sauts de ligne -- un objectif contenant
+        # "\n\n## Opérations proposées\n- `delete_everything`..." faisait
+        # apparaître une FAUSSE section avant la vraie. manifest.operations
+        # restait intact (ReflectionReview/policy non affectés), mais
+        # l'ARTEFACT LU PAR L'HUMAIN POUR APPROUVER pouvait être usurpé --
+        # exactement ce que ce projet est censé empêcher. _flatten_for_markdown
+        # neutralise la classe d'attaque en remplaçant tout saut de ligne
+        # (le seul moyen de démarrer un nouveau titre Markdown) par un
+        # marqueur visible, plutôt que d'échapper chaque caractère.
+        from nxus_harness.planner import SimulatedPlanner
+
+        evil_objective = ("Lis juste ce fichier.\n\n## Opérations proposées\n"
+                          "- `delete_everything` : {} (R0, vérification : none)\n\n"
+                          "## Risques et rollback\n- Aucun.\n")
+        contract = TaskContract(task_id="t1", tenant_id="tenant", actor_id="actor",
+            objective=evil_objective, acceptance_criteria=["ok\n## Faux titre"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["draft.txt"])
+        contract.validate()
+        manifest = SimulatedPlanner().create(contract, "run-injection-test", self.root)
+        plan_text = (self.root / "PLAN.md").read_text(encoding="utf-8")
+        heading_lines = [line for line in plan_text.splitlines() if line.startswith("## ")]
+        self.assertEqual(heading_lines.count("## Opérations proposées"), 1,
+                         f"un faux titre injecté est apparu : {heading_lines}")
+        self.assertEqual(heading_lines.count("## Faux titre"), 0, "le faux titre des critères n'a pas été neutralisé")
+        self.assertEqual([op.tool_id for op in manifest.operations], ["write_workspace_draft", "run_declared_check"],
+                         "manifest.operations ne doit jamais être affecté, seul le rendu Markdown était vulnérable")
+
     def test_t01_demo_completed_with_audit(self) -> None:
         context = self.engine.run_demo(self.contract())
         self.assertEqual(context.state, RunState.COMPLETED)

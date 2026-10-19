@@ -35,10 +35,29 @@ class SimulatedPlanner:
         )
 
     @staticmethod
-    def _render_plan(contract: TaskContract, operations: list[PlannedOperation]) -> str:
+    def _flatten_for_markdown(text: str) -> str:
+        """[AJOUTÉ 19/10/2026 — faille réelle trouvée par un agent puis
+        VÉRIFIÉE en vrai : contract.objective/acceptance_criteria sont
+        interpolés dans PLAN.md sans aucun échappement. Un objectif
+        contenant "\\n\\n## Opérations proposées\\n- `delete_everything`..."
+        fait apparaître une FAUSSE section "Opérations proposées" dans le
+        PLAN.md, AVANT la vraie -- un humain qui lit le fichier pour
+        approuver peut voir des opérations qui ne sont PAS dans
+        manifest.operations (celui-ci reste intact, c'est uniquement
+        l'artefact d'approbation lu par l'humain qui est usurpé). La cause
+        racine est le SAUT DE LIGNE : un titre Markdown (## ...) n'est
+        reconnu qu'en DÉBUT de ligne. Remplacer tout saut de ligne par un
+        marqueur visible neutralise toute la classe d'attaque sans avoir
+        besoin d'échapper chaque caractère Markdown individuellement (#,
+        backticks, etc. restent inoffensifs au milieu d'une ligne)."""
+        return text.replace("\r\n", " ␤ ").replace("\r", " ␤ ").replace("\n", " ␤ ")
+
+    @classmethod
+    def _render_plan(cls, contract: TaskContract, operations: list[PlannedOperation]) -> str:
         lines = [
-            f"# PLAN — {contract.task_id}", "", "## Objectif", contract.objective, "",
-            "## Critères d’acceptation", *[f"- {criterion}" for criterion in contract.acceptance_criteria], "",
+            f"# PLAN — {contract.task_id}", "", "## Objectif", cls._flatten_for_markdown(contract.objective), "",
+            "## Critères d’acceptation",
+            *[f"- {cls._flatten_for_markdown(criterion)}" for criterion in contract.acceptance_criteria], "",
             "## Périmètre", *[f"- {path}" for path in contract.allowed_paths], "",
             "## Opérations proposées",
         ]
