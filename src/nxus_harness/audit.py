@@ -94,9 +94,16 @@ class AuditLog:
                 return False, f"ligne {line_no} invalide"
             if event.get("previous_hash") != previous:
                 return False, f"rupture de chaîne ligne {line_no}"
-            if content_hash(event) != actual_hash:
+            # [CORRIGÉ 19/10/2026 — trouvé via smokinggun_scan le 18/10,
+            # corrigé le 19/10] canonical_json(event) était recalculé
+            # jusqu'à 3 fois par ligne (une fois implicitement dans
+            # content_hash, deux fois pour les deux contrôles `in`) --
+            # sérialisé une seule fois ici et réutilisé ; content_hash()
+            # accepte déjà une chaîne directement sans re-sérialiser.
+            serialized = canonical_json(event)
+            if content_hash(serialized) != actual_hash:
                 return False, f"hash invalide ligne {line_no}"
-            if "TOP_SECRET_" in canonical_json(event) or "sk-" in canonical_json(event):
+            if "TOP_SECRET_" in serialized or "sk-" in serialized:
                 return False, f"secret non redacté ligne {line_no}"
             previous = actual_hash
         return True, "chaîne valide"
