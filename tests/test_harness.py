@@ -828,6 +828,30 @@ class HarnessTestCase(unittest.TestCase):
         self.assertFalse(declared["passed"])
         self.assertIn("error", declared)
 
+    def test_t57_stdout_matches_file_rejects_truncated_stdout_instead_of_comparing_padding(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : _run_capped() tronque un stdout qui depasse le plafond
+        # (8000 car. pour execute_python) en NE GARDANT QUE LA FIN du
+        # buffer. Un modele peut imprimer la vraie valeur PUIS un
+        # remplissage predictible au-dela du plafond -- stdout_matches_file
+        # comparait alors contre ce remplissage tronque au lieu du vrai
+        # calcul, exactement le contournement que ce verificateur a ete
+        # ajoute pour empecher (voir test_t26 ci-dessus) mais rouvert par un
+        # angle different (troncature plutot qu'un mensonge direct).
+        contract = self._agentic_contract(allowed_paths=["resultat.txt"],
+                                          allowed_tools=["execute_python", "write_workspace_draft", "run_declared_check"])
+        padding = "X" * 8500  # au-dela du plafond de 8000 caracteres
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "execute_python", "arguments": {"code": f"print('42' + {padding!r})"}},
+            {"tool_id": "write_workspace_draft", "arguments": {"path": "resultat.txt", "content": padding[-8000:]}},
+            {"tool_id": "run_declared_check", "arguments": {"check": "stdout_matches_file:resultat.txt"}},
+        ]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        self.assertNotEqual(context.state, RunState.COMPLETED)
+        declared = context.results[-1]["result"]
+        self.assertFalse(declared["passed"])
+        self.assertIn("tronqué", declared.get("error", ""))
+
     def test_t25_agentic_execution_without_declared_check_fails(self) -> None:
         # Sans AUCUN run_declared_check proposé, le run ne doit plus pouvoir
         # COMPLETED silencieusement pour AGENTIC_EXECUTION (avant : NOT_APPLICABLE).

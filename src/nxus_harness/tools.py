@@ -367,6 +367,22 @@ class ToolGateway:
                 if prior_entry["result"].get("exit_code") != 0:
                     return {"check": check, "exit_code": 1, "passed": False, "actual": actual,
                            "error": "le execute_python précédent a échoué (exit_code != 0) : rien à vérifier"}
+                # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+                # verifie en vrai : _run_capped() tronque un stdout qui
+                # depasse le plafond en NE GARDANT QUE LA FIN du buffer
+                # (voir plus bas, "output_truncated"). Ce check comparait
+                # deja contre prior_stdout sans jamais regarder ce drapeau
+                # -- un modele pouvait imprimer la vraie valeur PUIS du
+                # remplissage predictible au-dela du plafond, laissant
+                # stdout_matches_file comparer contre ce remplissage au lieu
+                # du vrai calcul. Exactement le contournement que ce
+                # verificateur a ete ajoute pour empecher (voir commentaire
+                # 18/10/2026 ci-dessus), rouvert par un angle different. Un
+                # stdout tronque ne peut jamais etre traite comme "la vraie
+                # sortie" : refuse plutot que de comparer un fragment.
+                if prior_entry["result"].get("output_truncated"):
+                    return {"check": check, "exit_code": 1, "passed": False, "actual": actual,
+                           "error": "stdout du execute_python précédent tronqué (plafond de sortie) : comparaison non fiable"}
                 prior_stdout = prior_entry["result"].get("stdout", "").strip()
                 if not prior_stdout:
                     return {"check": check, "exit_code": 1, "passed": False, "actual": actual,
