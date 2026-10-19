@@ -11,6 +11,7 @@ from .llama_cpp_adapter import LlamaCppAdapter, LlamaCppProfile
 from .llm_planner import LlmPlanner
 from .models import PolicyDenied, TaskContract, ValidationError
 from .planner import DevilAdvocate
+from .skeptical_review import skeptical_review
 
 # [AJOUTÉ 18/10/2026 — exe autonome] L'exe distribué seul (sans le checkout
 # complet) n'a pas fixtures/ : demo/submit échouaient avec une erreur peu
@@ -97,6 +98,18 @@ def main(argv: list[str] | None = None) -> int:
     approve.add_argument("run_id")
     approve.add_argument("--actor", required=True, help="doit correspondre à l'actor_id du contrat")
     approve.add_argument("--yes", action="store_true", help="n'affiche pas l'invite de confirmation (scripts/tests)")
+    # [AJOUTE 20/10/2026 -- angle mort trouve par un agent puis corrige :
+    # skeptical_review.py existe, est teste (test_t35), son docstring le
+    # decrit comme une couche active du pipeline de revue -- mais aucun
+    # appelant reel (cli.py/engine.py) ne l'invoquait jamais. L'avis
+    # consultatif qu'il est cense fournir a un humain n'etait produit par
+    # AUCUN chemin reel, seulement par les tests qui l'appellent directement
+    # avec de faux adapters. Opt-in (jamais par defaut, jamais obligatoire)
+    # pour ne rien changer au comportement existant sans --llm fourni ici :
+    # l'avis reste NON CONTRAIGNANT (voir skeptical_review.py), ecrit dans
+    # un fichier separe, jamais lu par verify_and_complete().
+    approve.add_argument("--llm", help="id de modèle : si fourni, produit un avis sceptique consultatif après exécution (skeptical_review.txt)")
+    approve.add_argument("--base-url", default="http://127.0.0.1:8080", help="URL de llama-server si --llm est fourni")
     verify = sub.add_parser("verify-audit", help="vérifier un journal d’audit JSONL")
     verify.add_argument("path", type=Path)
     challenge = sub.add_parser("devil-advocate", help="produire une critique sans outil")
@@ -139,6 +152,14 @@ def main(argv: list[str] | None = None) -> int:
             except PolicyDenied as exc:
                 print(json.dumps({"run_id": context.run_id, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
                 return 2
+            if args.llm:
+                adapter = LlamaCppAdapter(LlamaCppProfile(base_url=args.base_url, model=args.llm, enabled=True))
+                avis = skeptical_review(
+                    adapter, objective=context.contract.objective,
+                    plan_text=(context.run_dir / "PLAN.md").read_text(encoding="utf-8"),
+                    workspace=context.workspace, results=context.results or [],
+                )
+                (context.run_dir / "skeptical_review.txt").write_text(avis, encoding="utf-8")
             print(json.dumps({"run_id": context.run_id, "state": context.state.value, "run_dir": str(context.run_dir)}, ensure_ascii=False))
             return 0 if context.state.value == "COMPLETED" else 1
 

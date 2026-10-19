@@ -1480,5 +1480,68 @@ class AuditLogConcurrencyTests(unittest.TestCase):
         self.assertIn("troncature", message)
 
 
+class CliSkepticalReviewWiringTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- angle mort trouve par un agent : skeptical_review.py
+    existe, est teste isolement (test_t35), son docstring le decrit comme
+    une couche active du pipeline de revue -- mais aucun appelant reel
+    (cli.py/engine.py) ne l'invoquait jamais. Cette classe verifie que la
+    commande `approve --llm` reelle (cli.main, pas un appel direct a la
+    fonction) produit bien un avis et l'ecrit sur disque."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "fixtures").mkdir()
+        fixture_source = Path(__file__).resolve().parents[1] / "fixtures" / "corpus.md"
+        shutil.copy(fixture_source, self.root / "fixtures" / "corpus.md")
+        self.engine = HarnessEngine(self.root)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_t60_approve_llm_flag_actually_invokes_skeptical_review_and_writes_it(self) -> None:
+        from nxus_harness import cli
+        from unittest.mock import patch
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.submit(contract)
+        self.assertEqual(context.state, RunState.AWAITING_APPROVAL)
+
+        with patch.object(cli, "skeptical_review", return_value="rien de louche") as mocked:
+            exit_code = cli.main([
+                "--root", str(self.root), "approve", contract.tenant_id, context.run_id,
+                "--actor", contract.actor_id, "--yes", "--llm", "un-modele.gguf",
+            ])
+        self.assertEqual(exit_code, 0)
+        mocked.assert_called_once()
+        avis_path = context.run_dir / "skeptical_review.txt"
+        self.assertTrue(avis_path.is_file())
+        self.assertEqual(avis_path.read_text(encoding="utf-8"), "rien de louche")
+
+    def test_t60_approve_without_llm_flag_never_writes_skeptical_review(self) -> None:
+        from nxus_harness import cli
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.submit(contract)
+        exit_code = cli.main([
+            "--root", str(self.root), "approve", contract.tenant_id, context.run_id,
+            "--actor", contract.actor_id, "--yes",
+        ])
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((context.run_dir / "skeptical_review.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
