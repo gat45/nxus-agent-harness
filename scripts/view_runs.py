@@ -66,6 +66,17 @@ class RunsHandler(BaseHTTPRequestHandler):
     mission_token: str | None = None  # None = pas d'authentification (loopback local uniquement)
     _mission_lock = threading.Lock()  # une mission a la fois : execute_python est synchrone
     _mission_counter = 0
+    # [AJOUTE 20/10/2026] StreamRequestHandler.setup() applique cette valeur
+    # via connection.settimeout() avant chaque requete -- sans elle,
+    # rfile.read() peut bloquer sans fin sur un client qui retient le corps
+    # (meme sous le plafond ci-dessus en do_POST), gelant ce serveur
+    # single-threaded pour tout le monde.
+    timeout = 10
+    # [AJOUTE 20/10/2026] StreamRequestHandler.setup() applique cette valeur
+    # via connection.settimeout() avant chaque requete -- sans elle,
+    # rfile.read() peut bloquer sans fin sur un client qui retient le corps
+    # (meme sous le plafond ci-dessus en do_POST), gelant ce serveur
+    # single-threaded pour tout le monde.
 
     def _send_html(self, status: int, body: str) -> None:
         payload = body.encode("utf-8")
@@ -104,7 +115,21 @@ class RunsHandler(BaseHTTPRequestHandler):
         # inchangé en loopback local) : si configuré, le POST doit fournir
         # le même jeton via l'en-tête X-Mission-Token, sinon refus 401
         # avant même de lire le corps de la requête.
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (socket brut, Content-Length: 5000000000 avec ~11 octets
+        # envoyes) : HTTPServer ici est single-threaded, et rfile.read(length)
+        # bloque sans timeout jusqu'a recevoir `length` octets. Un client qui
+        # annonce un Content-Length enorme et retient le corps gele cette
+        # lecture indefiniment et AFFAME tous les autres clients (meme GET /
+        # en lecture seule), sans authentification -- la verification
+        # mission_token n'intervient qu'APRES cette lecture. Le formulaire ne
+        # transporte que objective/token : un plafond de quelques Ko suffit
+        # largement et rejette le payload avant de le lire.
+        MAX_MISSION_BODY_BYTES = 8192
         length = int(self.headers.get("Content-Length", "0"))
+        if length > MAX_MISSION_BODY_BYTES:
+            self._send_html(413, "<h1>413 — corps de requête trop volumineux</h1>")
+            return
         body = self.rfile.read(length).decode("utf-8") if length else ""
         fields = urllib.parse.parse_qs(body)
         if self.mission_token is not None:

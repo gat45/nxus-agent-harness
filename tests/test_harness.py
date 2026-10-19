@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -1202,6 +1203,68 @@ class MissionLoopTests(unittest.TestCase):
         # l'appel pour la mission 3 n'aurait jamais ete atteint (le test
         # lui-meme aurait echoue avec TimeoutError non rattrapee).
         self.assertEqual(executed, [1, 2, 3])
+
+
+class ViewRunsSecurityTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : scripts/view_runs.py (RunsHandler.do_POST) lisait
+    self.rfile.read(length) avec un `length` pris tel quel dans l'en-tete
+    Content-Length, sans plafond ni timeout. Un client qui annonce un
+    Content-Length enorme (ex. 5 000 000 000) et retient le corps bloque
+    cette lecture indefiniment -- et comme HTTPServer ici est
+    single-threaded, cela AFFAME tous les autres clients (meme GET / en
+    lecture seule), sans authentification requise (la verification
+    mission_token n'intervenait qu'APRES cette lecture)."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="nxus-viewruns-"))
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "view_runs.py"
+        import subprocess as _subprocess
+        self.port = 8798
+        self.proc = _subprocess.Popen(
+            [sys.executable, str(script_path), "--port", str(self.port), "--root", str(self.root)],
+            cwd=str(script_path.parents[1]),
+            env={**__import__("os").environ, "PYTHONPATH": str(script_path.parents[1] / "src")},
+            stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
+
+    def tearDown(self) -> None:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_t53_huge_content_length_on_mission_is_rejected_without_starving_other_clients(self) -> None:
+        import socket
+        malicious = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        malicious.sendall(
+            (
+                "POST /mission HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                "Content-Length: 5000000000\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n"
+                "Connection: keep-alive\r\n\r\n"
+                "objective=x"
+            ).encode("utf-8")
+        )
+        malicious.settimeout(5)
+        response = malicious.recv(4096)
+        self.assertIn(b"413", response.split(b"\r\n", 1)[0])
+
+        # Avant le correctif, cette connexion GET bloquait (le serveur
+        # single-threaded restait coince sur rfile.read() de la connexion
+        # malicieuse ci-dessus) : ce test aurait echoue par TimeoutError.
+        start = time.monotonic()
+        healthy = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        healthy.sendall(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nConnection: close\r\n\r\n".encode())
+        healthy.settimeout(5)
+        got = healthy.recv(4096)
+        elapsed = time.monotonic() - start
+        self.assertIn(b"200", got.split(b"\r\n", 1)[0])
+        self.assertLess(elapsed, 2.0)
 
 
 if __name__ == "__main__":
