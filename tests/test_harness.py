@@ -1267,5 +1267,68 @@ class ViewRunsSecurityTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
 
 
+class LlamaCppAdapterSecurityTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : LlamaCppAdapter._get_json / structured_chat faisaient
+    response.read() SANS plafond de taille ni delai total -- seulement un
+    timeout PAR OPERATION socket (urlopen(timeout=...)), qui se reinitialise
+    a chaque recv() reussi. Un serveur loopback buggy/compromis qui renvoie
+    un corps enorme (ou l'egoutte lentement) peut etre lu en entier en
+    memoire sans aucune limite. Meme classe de bug que celle corrigee dans
+    view_runs.py, cote consommateur plutot que cote serveur."""
+
+    def setUp(self) -> None:
+        import http.server
+        import threading as _threading
+
+        oversized_body = json.dumps({
+            "choices": [{"message": {"content": json.dumps({"operations": []}) + " " * (9 * 1024 * 1024)}}],
+        }).encode("utf-8")
+
+        class _OversizedHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(oversized_body)))
+                self.end_headers()
+                # Ecrit par petits blocs : un unique wfile.write() de
+                # plusieurs Mio provoque un ConnectionResetError cote
+                # SERVEUR sur Windows avant meme que le client ne lise quoi
+                # que ce soit -- limitation de ce serveur de test jetable,
+                # sans rapport avec le code audite.
+                view = memoryview(oversized_body)
+                for offset in range(0, len(view), 65536):
+                    self.wfile.write(view[offset:offset + 65536])
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), _OversizedHandler)
+        self.port = self.server.server_address[1]
+        self.thread = _threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+
+    def test_t54_structured_chat_rejects_oversized_response_instead_of_buffering_it_whole(self) -> None:
+        from nxus_harness.llama_cpp_adapter import LlamaCppAdapter, LlamaCppProfile
+
+        adapter = LlamaCppAdapter(LlamaCppProfile(
+            base_url=f"http://127.0.0.1:{self.port}", model="m", enabled=True, timeout_seconds=5,
+        ))
+        start = time.monotonic()
+        with self.assertRaises(ValidationError):
+            adapter.structured_chat([{"role": "user", "content": "x"}], schema={"required": []})
+        # Avant le correctif, response.read() aurait bufferise les ~9 Mio en
+        # entier avant meme d'atteindre la validation de contenu -- ca
+        # "marchait" pour cette taille modeste, mais sans aucun garde le
+        # meme code accepterait n'importe quelle taille. L'assertion
+        # significative est la levee de ValidationError pour un corps
+        # au-dela du plafond, prouvant que le garde existe et s'applique.
+        self.assertLess(time.monotonic() - start, 5.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -20,8 +20,41 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import json
+import time
 
 from .models import ValidationError
+
+
+# [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en vrai
+# (serveur HTTP local jetable renvoyant un corps de plusieurs Mio, lu en
+# entier sans aucun garde) : `timeout_seconds` passe a urlopen() est un
+# timeout PAR OPERATION socket, pas un plafond sur la requete entiere --
+# il se reinitialise a chaque recv() reussi. Un pair qui egoutte des octets
+# un par un peut tenir la connexion ouverte indefiniment pendant que
+# response.read() accumule tout en memoire, sans aucune limite de taille ni
+# de temps total. Meme classe de bug que celle corrigee dans view_runs.py
+# (Content-Length non plafonne), cote inverse de la frontiere de confiance :
+# ici c'est le harness qui consomme une reponse sans garde. Une reponse
+# JSON de plan legitime est petite (quelques Ko) ; ce plafond est large par
+# securite mais reste fini.
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _read_capped(response: Any, *, max_bytes: int = _MAX_RESPONSE_BYTES, deadline_seconds: float) -> bytes:
+    deadline = time.monotonic() + deadline_seconds
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise ValidationError("réponse llama.cpp trop lente (délai total dépassé)")
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValidationError("réponse llama.cpp trop volumineuse")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _strip_markdown_code_fence(content: str) -> str:
@@ -109,7 +142,8 @@ class LlamaCppAdapter:
     def _get_json(self, path: str) -> dict[str, Any]:
         request = Request(self.profile.base_url.rstrip("/") + path, method="GET")
         with urlopen(request, timeout=self.profile.timeout_seconds) as response:  # nosec B310: loopback validated
-            return json.loads(response.read().decode("utf-8"))
+            raw_bytes = _read_capped(response, deadline_seconds=self.profile.timeout_seconds)
+            return json.loads(raw_bytes.decode("utf-8"))
 
     def model_status(self) -> dict[str, Any]:
         """Lecture seule : contexte réel et métadonnées par modèle exposé par
@@ -195,7 +229,8 @@ class LlamaCppAdapter:
         request = Request(self.profile.base_url.rstrip("/") + "/v1/chat/completions", data=payload,
                           headers={"Content-Type": "application/json"}, method="POST")
         with urlopen(request, timeout=self.profile.timeout_seconds) as response:  # nosec B310: loopback validated
-            raw = json.loads(response.read().decode("utf-8"))
+            raw_bytes = _read_capped(response, deadline_seconds=self.profile.timeout_seconds)
+            raw = json.loads(raw_bytes.decode("utf-8"))
         # [AJOUTÉ 18/10/2026 — demandé : afficher les tokens/s] llama-server
         # renvoie ses propres mesures de débit dans "timings" à chaque
         # réponse (predicted_per_second = tokens/s de génération réels,
