@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
+import threading
 import ipaddress
 import socket
 
@@ -111,9 +112,19 @@ class PolicyEngine:
 
     def __init__(self) -> None:
         self.kill_switch = False
+        # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
+        # kill_switch (bool) n'était consulté QUE lors de l'autorisation de
+        # la PROCHAINE opération -- un sous-processus déjà lancé (execute_python,
+        # rea_inspect, smokinggun_scan, jacobian_verify) continuait jusqu'à son
+        # propre timeout, sans aucun moyen pour stop() de l'atteindre.
+        # threading.Event (pas juste un bool) : observable depuis un thread
+        # séparé (ex. un watchdog dans _run_capped qui attend ce signal),
+        # contrairement à un bool qu'il faudrait sonder en boucle serrée.
+        self.cancel_event = threading.Event()
 
     def stop(self) -> None:
         self.kill_switch = True
+        self.cancel_event.set()
 
     def authorize(self, *, contract: TaskContract, manifest: PlanManifest, state: RunState,
                   tool_id: str, arguments: dict[str, Any], tool_risk: RiskLevel) -> PolicyDecision:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from typing import Any
 import json
 import subprocess
@@ -20,7 +20,8 @@ from .policy import PolicyEngine
 
 
 def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, str] | None = None,
-                shell: bool = False, max_stdout: int = 8000, max_stderr: int = 4000) -> dict[str, Any]:
+                shell: bool = False, max_stdout: int = 8000, max_stderr: int = 4000,
+                cancel_event: Event | None = None) -> dict[str, Any]:
     """[AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
     subprocess.run(capture_output=True) capture la sortie EN ENTIER en
     mémoire avant que notre code ne la tronque aux derniers N caractères --
@@ -58,6 +59,20 @@ def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, st
               Thread(target=_drain, args=(proc.stderr, "stderr", max_stderr), daemon=True)]
     for reader in readers:
         reader.start()
+    # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
+    # PolicyEngine.stop() positionnait kill_switch (bool) mais rien n'avait
+    # de prise sur un sous-processus DÉJÀ lancé -- il tournait jusqu'à son
+    # propre timeout, kill switch ou pas. Un watchdog séparé attend le
+    # cancel_event (threading.Event, observable depuis un autre thread,
+    # contrairement au bool) et tue le process dès qu'il se déclenche, sans
+    # attendre le timeout normal.
+    cancelled = {"flag": False}
+    if cancel_event is not None:
+        def _watch_cancel() -> None:
+            if cancel_event.wait(timeout=timeout):
+                cancelled["flag"] = True
+                proc.kill()
+        Thread(target=_watch_cancel, daemon=True).start()
     try:
         proc.wait(timeout=timeout)
         timed_out = False
@@ -69,8 +84,8 @@ def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, st
         reader.join(timeout=5)
     proc.stdout.close()
     proc.stderr.close()
-    return {"exit_code": None if timed_out else proc.returncode, "stdout": buffers["stdout"],
-           "stderr": buffers["stderr"], "timed_out": timed_out,
+    return {"exit_code": None if (timed_out or cancelled["flag"]) else proc.returncode, "stdout": buffers["stdout"],
+           "stderr": buffers["stderr"], "timed_out": timed_out, "cancelled": cancelled["flag"],
            "output_truncated": overflowed["stdout"] or overflowed["stderr"]}
 
 
@@ -349,7 +364,8 @@ class ToolGateway:
             # PYTHONIOENCODING=utf-8 dans l'environnement du sous-processus.
             env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
             return _run_capped([sys.executable, "-c", arguments["code"]], cwd=self.workspace,
-                               timeout=timeout, env=env, max_stdout=8000, max_stderr=4000)
+                               timeout=timeout, env=env, max_stdout=8000, max_stderr=4000,
+                               cancel_event=self.policy.cancel_event)
         if tool_id == "fetch_url":
             # [AJOUTÉ 18/10/2026 — R2] PolicyEngine a déjà validé l'allowlist
             # exacte + la garde SSRF basique avant d'arriver ici (voir
@@ -443,7 +459,7 @@ class ToolGateway:
             # modèle) — risque d'injection shell résiduel jugé acceptable.
             result = _run_capped(["rea", arguments["subcommand"], arguments["target"], "--json"],
                                  cwd=self.workspace, timeout=timeout, shell=(os.name == "nt"),
-                                 max_stdout=8000, max_stderr=2000)
+                                 max_stdout=8000, max_stderr=2000, cancel_event=self.policy.cancel_event)
             return {"subcommand": arguments["subcommand"], "target": arguments["target"], "untrusted": True, **result}
         if tool_id == "smokinggun_scan":
             # [AJOUTÉ 18/10/2026] Analyseur STATIQUE confirmé (morluto/
@@ -456,7 +472,7 @@ class ToolGateway:
             timeout = max(1, min(budget_seconds, 60))
             result = _run_capped(["smokinggun", "scan", arguments["target"], "--format", "sarif"],
                                  cwd=self.workspace, timeout=timeout, shell=(os.name == "nt"),
-                                 max_stdout=8000, max_stderr=2000)
+                                 max_stdout=8000, max_stderr=2000, cancel_event=self.policy.cancel_event)
             return {"target": arguments["target"], "untrusted": True, **result}
         if tool_id == "jacobian_verify":
             # [AJOUTÉ 18/10/2026] venv dédié .venv-jacobian/ (Python 3.12,
@@ -478,6 +494,7 @@ class ToolGateway:
             timeout = max(1, min(budget_seconds, 30))
             env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
             result = _run_capped([str(jacobian_bin), "run", arguments["operation_id"], "--json", arguments["args_json"]],
-                                 cwd=self.workspace, timeout=timeout, env=env, max_stdout=4000, max_stderr=2000)
+                                 cwd=self.workspace, timeout=timeout, env=env, max_stdout=4000, max_stderr=2000,
+                                 cancel_event=self.policy.cancel_event)
             return {"operation_id": arguments["operation_id"], **result}
         raise PolicyDenied("implémentation d’outil absente")

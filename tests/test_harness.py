@@ -604,6 +604,28 @@ class HarnessTestCase(unittest.TestCase):
         self.assertFalse(result["timed_out"])
         self.assertLess(elapsed, 10, "le process aurait dû être tué bien avant le budget complet")
 
+    def test_t40_kill_switch_terminates_running_subprocess_before_its_timeout(self) -> None:
+        # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
+        # PolicyEngine.stop() positionnait seulement un bool consulté lors
+        # de l'autorisation de la PROCHAINE opération -- un sous-processus
+        # déjà lancé (execute_python ici) tournait jusqu'à son propre
+        # timeout, kill switch ou pas. cancel_event (threading.Event) est
+        # maintenant observé par un watchdog dans _run_capped qui tue le
+        # process dès que stop() est appelé, depuis N'IMPORTE QUEL thread.
+        import threading
+        import time
+        from nxus_harness.tools import _run_capped
+        from nxus_harness.policy import PolicyEngine
+
+        policy = PolicyEngine()
+        t0 = time.monotonic()
+        threading.Timer(0.3, policy.stop).start()
+        result = _run_capped(["python", "-c", "import time; time.sleep(10)"], cwd=self.root,
+                             timeout=10, cancel_event=policy.cancel_event)
+        elapsed = time.monotonic() - t0
+        self.assertTrue(result["cancelled"])
+        self.assertLess(elapsed, 5, "le process aurait dû être tué par stop(), pas tourner jusqu'au timeout de 10s")
+
     def test_t23_execute_python_timeout_is_enforced(self) -> None:
         contract = self._agentic_contract(budget_seconds=1, acceptance_criteria=["le script tourne"])
         fake = _FakeAdapter({"operations": [
