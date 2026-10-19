@@ -1330,5 +1330,70 @@ class LlamaCppAdapterSecurityTests(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 5.0)
 
 
+class AuditLogConcurrencyTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : deux instances AuditLog reelles pointant sur le meme fichier
+    (meme scenario qu'un run repris en double, deja corrige pour
+    approvals.py/engine.py) mettaient chacune en cache memoire un
+    previous_hash perime -- deux threads qui appellent append() en meme
+    temps ecrivent des maillons en collision, SANS LEVER D'EXCEPTION, et la
+    corruption n'est decouverte que plus tard par AuditLog.verify()."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="nxus-audit-race-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_t55_concurrent_append_from_two_instances_keeps_the_hash_chain_valid(self) -> None:
+        import threading as _threading
+        path = self.root / "audit.jsonl"
+        errors: list[Exception] = []
+
+        def worker(component: str) -> None:
+            log = AuditLog(path, run_id="r", tenant_id="t")
+            try:
+                for i in range(50):
+                    log.append(component, f"action-{i}", "allow", {"i": i})
+            except Exception as exc:  # pragma: no cover - diagnostic si ca casse
+                errors.append(exc)
+
+        threads = [_threading.Thread(target=worker, args=(f"worker-{n}",)) for n in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(errors, [])
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+        self.assertEqual(len(lines), 100)
+        # Avant le correctif : verify() rapportait une rupture de chaine
+        # (previous_hash perime partage entre les deux instances) malgre
+        # l'absence de toute exception a l'ecriture.
+        valid, message = AuditLog.verify(path)
+        self.assertTrue(valid, message)
+
+    def test_t56_verify_detects_a_deleted_trailing_line(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : la chaine de hachage ne lie chaque ligne qu'a la
+        # precedente, donc supprimer la/les dernieres lignes d'un journal
+        # "append-only" laissait verify() rapporter "chaîne valide". Le
+        # sidecar .tail (ecrit sous le meme verrou qu'append()) ancre le
+        # dernier hash connu-bon hors du fichier principal.
+        path = self.root / "audit.jsonl"
+        log = AuditLog(path, run_id="r", tenant_id="t")
+        log.append("c", "a1", "allow", {})
+        log.append("c", "a2", "deny", {})
+        log.append("c", "a3", "allow", {})
+        self.assertTrue(AuditLog.verify(path)[0])
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")  # supprime la derniere ligne (a3)
+
+        valid, message = AuditLog.verify(path)
+        self.assertFalse(valid, message)
+        self.assertIn("troncature", message)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

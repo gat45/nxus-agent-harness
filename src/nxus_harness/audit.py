@@ -1,11 +1,14 @@
 """Journal JSONL append-only avec chaînage et redaction minimale."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 import json
+import os
 import re
+import time
 from uuid import uuid4
 
 from .models import ValidationError, canonical_json, content_hash, utc_now
@@ -79,18 +82,72 @@ class AuditLog:
         except (KeyError, json.JSONDecodeError) as exc:
             raise ValidationError("audit JSONL illisible") from exc
 
+    @contextmanager
+    def _exclusive_lock(self, *, timeout_seconds: float = 10.0) -> Iterator[None]:
+        """[AJOUTE 20/10/2026 -- faille reelle trouvee ET REPRODUITE (deux
+        instances AuditLog reelles pointant sur le meme fichier, 50 append()
+        chacune depuis deux threads) : self._previous_hash est mis en cache
+        en memoire au __init__ et apres chaque append(), sans jamais relire
+        le disque -- deux ecrivains concurrents (meme scenario qu'un run
+        repris en double, deja corrige pour approvals.py/engine.py) lisent
+        chacun le meme previous_hash perime et ecrivent des maillons en
+        collision. Resultat observe : aucune exception au moment de
+        l'ecriture (echec SILENCIEUX), mais AuditLog.verify() detecte la
+        chaine corrompue a partir de la ligne 2 -- au moment ou c'est
+        decouvert, les evenements legitimes sont deja indiscernables d'une
+        vraie alteration. Meme verrou portable O_CREAT|O_EXCL que
+        approvals.py, mais ICI la relecture du tail depuis le disque se fait
+        SOUS le verrou (pas seulement au __init__) pour que deux instances
+        ne partagent jamais un previous_hash perime."""
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        deadline = time.monotonic() + timeout_seconds
+        fd = None
+        while fd is None:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise ValidationError("verrou d'audit indisponible (contention)")
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            os.close(fd)
+            lock_path.unlink(missing_ok=True)
+
+    def _tail_sidecar_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".tail")
+
     def append(self, component: str, action: str, decision: str, details: dict[str, Any] | None = None) -> AuditEvent:
         safe_details = redact(details or {})
-        payload = {
-            "event_id": str(uuid4()), "timestamp": utc_now(), "run_id": self.run_id,
-            "tenant_id": self.tenant_id, "component": component, "action": action,
-            "decision": decision, "details": safe_details, "previous_hash": self._previous_hash,
-        }
-        event_hash = content_hash(payload)
-        payload["event_hash"] = event_hash
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(canonical_json(payload) + "\n")
-        self._previous_hash = event_hash
+        with self._exclusive_lock():
+            previous_hash = self._tail_hash()
+            payload = {
+                "event_id": str(uuid4()), "timestamp": utc_now(), "run_id": self.run_id,
+                "tenant_id": self.tenant_id, "component": component, "action": action,
+                "decision": decision, "details": safe_details, "previous_hash": previous_hash,
+            }
+            event_hash = content_hash(payload)
+            payload["event_hash"] = event_hash
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(canonical_json(payload) + "\n")
+            self._previous_hash = event_hash
+            # [AJOUTE 20/10/2026 -- faille reelle trouvee ET REPRODUITE : la
+            # chaine de hachage ne lie chaque ligne qu'a la PRECEDENTE ;
+            # rien n'ancre la longueur attendue du fichier ailleurs, donc
+            # supprimer les N dernieres lignes (truncature) laisse
+            # AuditLog.verify() rapporter "chaîne valide" -- confirme par un
+            # test reel (3 events ecrits, derniere ligne supprimee par
+            # ecriture de fichier brute, verify() toujours (True, ...)).
+            # Sidecar hors-bande (chemin different, ecrit SOUS le meme
+            # verrou qu'append() donc jamais perime) : le dernier event_hash
+            # connu-bon. verify() le compare au vrai dernier maillon trouve
+            # dans le fichier ; une troncature change ce dernier maillon
+            # (ou le fait disparaitre) sans toucher le sidecar, donc devient
+            # detectable. Protege contre une troncature APRES qu'un append()
+            # ait eu lieu avec le correctif en place ; n'ancre pas
+            # retroactivement un fichier deja tronque avant ce correctif.
+            self._tail_sidecar_path().write_text(event_hash, encoding="utf-8")
         return AuditEvent(**payload)
 
     @staticmethod
@@ -118,4 +175,9 @@ class AuditLog:
             if "TOP_SECRET_" in serialized or "sk-" in serialized:
                 return False, f"secret non redacté ligne {line_no}"
             previous = actual_hash
+        sidecar_path = path.with_suffix(path.suffix + ".tail")
+        if sidecar_path.exists():
+            expected_tail = sidecar_path.read_text(encoding="utf-8").strip()
+            if expected_tail and expected_tail != previous:
+                return False, "troncature détectée (dernier hash connu absent du journal)"
         return True, "chaîne valide"
