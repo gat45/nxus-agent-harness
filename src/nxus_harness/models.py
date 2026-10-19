@@ -128,6 +128,30 @@ def require_safe_identifier(value: str, *, label: str) -> None:
         raise ValidationError(f"{label} invalide (caractères autorisés : lettres, chiffres, _.-)")
 
 
+# [AJOUTE 20/10/2026 -- faille reelle trouvee ET REPRODUITE : TaskContract.
+# validate() (ci-dessous) ET policy.py (authorize(), P-PATH-002) rejetaient
+# tous les deux un chemin "sortant du workspace" en ne regardant que des
+# regles POSIX (prefixe "/", segments ".."). Un chemin comme
+# "C:/Windows/Temp/evil.txt" n'est ABSOLU POUR AUCUNE de ces deux regles --
+# PurePosixPath("C:/Windows/...").is_absolute() vaut False, et il ne
+# contient aucun ".." -- donc il passait les DEUX controles. Mais
+# tools.py._resolve_workspace_path() fait ensuite (workspace / chemin)
+# avec pathlib NATIF : sur Windows, joindre un Path a une chaine que
+# pathlib reconnait comme un chemin absolu avec lettre de lecteur IGNORE
+# la base entierement -- l'ecriture atterrit hors du workspace, sans le
+# moindre "../". Verifie en vrai : TaskContract.validate() acceptait ce
+# chemin, authorize() rendait "allow", et le chemin resolu final etait
+# bien hors du workspace. Meme lecon que SAFE_IDENTIFIER_PATTERN un peu
+# plus haut (raisonnement POSIX-seul sur un systeme de fichiers Windows) --
+# centralise ici pour que models.py ET policy.py utilisent EXACTEMENT la
+# meme regle.
+_DRIVE_ABSOLUTE_PATTERN = re.compile(r"^[A-Za-z]:")
+
+
+def is_drive_absolute_path(value: str) -> bool:
+    return bool(_DRIVE_ABSOLUTE_PATTERN.match(value))
+
+
 @dataclass(frozen=True)
 class TaskContract:
     task_id: str
@@ -162,7 +186,7 @@ class TaskContract:
         if self.max_risk > RiskLevel.R2:
             raise ValidationError("le MVP refuse les contrats au-delà de R2")
         for path in self.allowed_paths:
-            if path.startswith("/") or ".." in path.split("/"):
+            if path.startswith("/") or ".." in path.split("/") or is_drive_absolute_path(path):
                 raise ValidationError("un chemin autorisé doit être relatif et normalisé")
 
     @classmethod

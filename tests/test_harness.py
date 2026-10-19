@@ -563,6 +563,45 @@ class HarnessTestCase(unittest.TestCase):
             else:
                 self.assertIsNotNone(event["details"]["owasp_llm_risk"])
 
+    def test_t59_write_workspace_draft_rejects_windows_drive_absolute_path(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : P-PATH-002 validait le chemin via PurePosixPath, qui n'a
+        # aucune notion de lettre de lecteur Windows --
+        # PurePosixPath("C:/Windows/Temp/evil.txt").is_absolute() vaut False
+        # et ne contient aucun ".." : ce chemin passait le controle tel
+        # quel. tools.py._resolve_workspace_path() utilise ensuite pathlib
+        # NATIF (workspace / chemin) -- sur Windows, joindre un Path a une
+        # chaine reconnue comme un chemin absolu avec lettre de lecteur
+        # IGNORE la base entierement, et l'ecriture atterrit hors du
+        # workspace sans le moindre "../".
+        hostile_path = "C:/Windows/Temp/evil_poc.txt"
+        contract = TaskContract(
+            task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.CODE_CHANGE, max_risk=RiskLevel.R1,
+            allowed_paths=[hostile_path], allowed_tools=["write_workspace_draft"],
+        )  # pas de .validate() ici : isole la defense en profondeur de policy.py elle-meme
+        manifest = PlanManifest(
+            run_id="r", task_id="t", base_snapshot="x", allowed_paths=[hostile_path],
+            operations=[PlannedOperation("op-1", "write_workspace_draft",
+                                         {"path": hostile_path, "content": "pwned"}, RiskLevel.R1, "none")],
+            created_at=utc_now(), expires_at=utc_now(), plan_hash="x",
+        )
+        decision = PolicyEngine().authorize(
+            contract=contract, manifest=manifest, state=RunState.EXECUTING,
+            tool_id="write_workspace_draft", arguments={"path": hostile_path, "content": "pwned"},
+            tool_risk=RiskLevel.R1,
+        )
+        self.assertEqual(decision.outcome, "deny")
+        self.assertEqual(decision.rule_id, "P-PATH-002")
+
+    def test_t59_task_contract_validate_rejects_windows_drive_absolute_path(self) -> None:
+        with self.assertRaises(ValidationError):
+            TaskContract(
+                task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+                profile=TaskProfile.CODE_CHANGE, max_risk=RiskLevel.R1,
+                allowed_paths=["C:/Windows/Temp/evil.txt"], allowed_tools=["write_workspace_draft"],
+            ).validate()
+
     def test_t22_submit_stops_at_awaiting_approval(self) -> None:
         # [AJOUTÉ 18/10/2026 — humain dans la boucle] Avant ce correctif,
         # seule run_demo() existait : plan() + approve() + execute() dans le

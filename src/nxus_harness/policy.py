@@ -9,7 +9,8 @@ import threading
 import ipaddress
 import socket
 
-from .models import PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContract, TaskProfile, ValidationError
+from .models import (PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContract, TaskProfile, ValidationError,
+                     is_drive_absolute_path)
 
 # [AJOUTÉ 18/10/2026] Sous-commandes rea statiques/lecture seule uniquement
 # (confirmées via `rea --help` : jamais d'install, de debug interactif, de
@@ -181,7 +182,15 @@ class PolicyEngine:
                 normalized = PurePosixPath(raw_path)
             except TypeError:
                 return PolicyDecision("deny", "P-PATH-001", "chemin invalide")
-            if normalized.is_absolute() or ".." in normalized.parts:
+            # [AJOUTE 20/10/2026 -- faille reelle trouvee ET REPRODUITE :
+            # PurePosixPath("C:/Windows/Temp/evil.txt").is_absolute() vaut
+            # False (aucune notion de lettre de lecteur en POSIX) et ne
+            # contient aucun ".." -- ce chemin passait ce controle, puis
+            # tools.py._resolve_workspace_path() (pathlib NATIF) resolvait
+            # hors du workspace sur Windows, sans le moindre "../". Voir
+            # models.py (is_drive_absolute_path) pour la meme regle
+            # partagee avec TaskContract.validate().
+            if normalized.is_absolute() or ".." in normalized.parts or is_drive_absolute_path(raw_path):
                 return PolicyDecision("deny", "P-PATH-002", "chemin sortant du workspace")
             if raw_path not in manifest.allowed_paths or raw_path not in contract.allowed_paths:
                 return PolicyDecision("deny", "P-PATH-003", "chemin hors périmètre autorisé")
