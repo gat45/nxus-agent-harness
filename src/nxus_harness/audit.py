@@ -16,6 +16,18 @@ _SECRET_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._-]+", re.I),
     re.compile(r"\bTOP_SECRET_[A-Za-z0-9_-]+\b"),
+    # [AJOUTÉ 19/10/2026 — conçu par un agent après relecture : les motifs
+    # précédents ne couvraient que des formes génériques (clé=valeur, sk-,
+    # Bearer). execute_python/fetch_url sont les SEULS points où du contenu
+    # externe arbitraire entre dans `details` -- un print() de variable
+    # d'environnement ou un cat de fichier de clé réelle a une forme
+    # précise que ces motifs génériques ne reconnaissent pas. Ajoutés
+    # seulement pour des formes plausibles via CES outils précis (pas un
+    # scanner générique "toutes les clés cloud possibles" -- sur-ingénierie
+    # pour un harnais mono-opérateur local).
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # clé d'accès AWS
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),  # token GitHub (personnel/OAuth/user/server)
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),  # en-tête de clé privée (ex. cat accidentel d'un fichier .pem)
 ]
 
 

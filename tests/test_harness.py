@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nxus_harness.approvals import ApprovalService
-from nxus_harness.audit import AuditLog
+from nxus_harness.audit import AuditLog, redact
 from nxus_harness.engine import HarnessEngine
 from nxus_harness.evidence import EvidenceStore
 from nxus_harness.models import (Claim, PlanManifest, PlannedOperation, PolicyDenied, RiskLevel, RunState, TaskContract,
@@ -272,6 +272,23 @@ class HarnessTestCase(unittest.TestCase):
         entries = store.recall("tenant-ttl")
         run_ids = {entry.run_id for entry in entries}
         self.assertEqual(run_ids, {"fresh", "forever"}, "l'entree expiree 'old' n'aurait jamais du etre rappelee")
+
+    def test_t44_audit_redacts_aws_github_and_private_key_leaks(self) -> None:
+        # [AJOUTÉ 19/10/2026 — conçu par un agent, P2 d'un rapport d'audit
+        # externe] execute_python/fetch_url sont les seuls points où du
+        # contenu externe arbitraire entre dans l'audit (ex. un print()
+        # accidentel d'une variable d'environnement, ou un cat de clé
+        # privée via execute_python). Les anciens motifs (clé=valeur, sk-,
+        # Bearer) ne reconnaissaient pas ces formes précises -- vérifié
+        # qu'elles fuitaient AVANT ce correctif en inspectant le code, et
+        # qu'elles sont bien masquées maintenant.
+        aws_key = "AKIA" + "A" * 16
+        github_token = "ghp_" + "x" * 36
+        private_key_header = "-----BEGIN RSA PRIVATE KEY-----"
+        for secret in (aws_key, github_token, private_key_header):
+            cleaned = redact(f"stdout contenait : {secret} puis la suite")
+            self.assertNotIn(secret, cleaned, f"secret non masque : {secret!r}")
+            self.assertIn("[REDACTED]", cleaned)
 
     def test_t19_memory_is_isolated_per_tenant(self) -> None:
         self.engine.run_demo(self.contract(tenant="tenant-x"))
