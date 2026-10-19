@@ -703,6 +703,32 @@ class HarnessTestCase(unittest.TestCase):
         self.assertTrue(result["cancelled"])
         self.assertLess(elapsed, 5, "le process aurait dû être tué par stop(), pas tourner jusqu'au timeout de 10s")
 
+    def test_t45_unexpected_exception_during_execution_reaches_blocked_state(self) -> None:
+        # [AJOUTÉ 19/10/2026 — ENG-04 du cahier des charges : "couverture
+        # des transitions d'état... pas uniquement des lignes de code".
+        # Trouvé en comparant chaque RunState de la machine d'états aux
+        # assertions réelles de la suite : RunState.BLOCKED existe depuis
+        # le début (execute()'s except Exception -> BLOCKED, engine.py)
+        # mais AUCUN test n'avait jamais vérifié qu'un run y arrive
+        # vraiment -- ce chemin tournait en confiance aveugle. Reproduit
+        # avec un vrai crash non anticipé : la première opération écrit un
+        # FICHIER nommé "sub", la seconde essaie d'écrire "sub/nested.txt"
+        # -- target.parent.mkdir(parents=True, exist_ok=True) échoue alors
+        # avec NotADirectoryError/FileExistsError, une exception que
+        # write_workspace_draft ne capture jamais.
+        contract = self._agentic_contract(allowed_paths=["sub", "sub/nested.txt"],
+                                          allowed_tools=["write_workspace_draft"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "write_workspace_draft", "arguments": {"path": "sub", "content": "je suis un fichier, pas un dossier"}},
+            {"tool_id": "write_workspace_draft", "arguments": {"path": "sub/nested.txt", "content": "ceci devrait planter"}},
+        ]})
+        with self.assertRaises(Exception):
+            self.engine.run_with_llm(contract, LlmPlanner(fake))
+        # Le run doit avoir réellement atteint BLOCKED (pas juste "une exception a jailli") :
+        runs = list((self.engine.runs_root / contract.tenant_id).iterdir())
+        state = json.loads((runs[0] / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state, "BLOCKED", "le crash aurait dû transitionner le run vers BLOCKED, pas rester ailleurs")
+
     def test_t23_execute_python_timeout_is_enforced(self) -> None:
         contract = self._agentic_contract(budget_seconds=1, acceptance_criteria=["le script tourne"])
         fake = _FakeAdapter({"operations": [
