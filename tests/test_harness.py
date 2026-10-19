@@ -527,6 +527,59 @@ class HarnessTestCase(unittest.TestCase):
         context = self.engine.run_with_llm(contract, LlmPlanner(fake))
         self.assertTrue(context.results[0]["result"]["timed_out"])
 
+    def test_t35_skeptical_review_is_advisory_and_never_raises(self) -> None:
+        # [AJOUTÉ 19/10/2026 — inspiré par comparaison avec un autre
+        # harnais, dont le "tech lead" est un LLM qui ne fait QUE donner un
+        # verdict (VALIDÉ/À REFAIRE) sans aucune preuve structurelle. Ici
+        # l'avis est explicitement NON CONTRAIGNANT : ce test vérifie que
+        # (a) la persona méfiante et la température basse sont bien
+        # transmises, (b) une panne de l'adaptateur ne fait JAMAIS échouer
+        # l'appelant (c'est un avis, pas une porte de validation).
+        from nxus_harness.skeptical_review import skeptical_review
+        import tempfile
+        from pathlib import Path
+
+        class _RaisingAdapter:
+            def structured_chat(self, *args, **kwargs):
+                raise RuntimeError("llama-server indisponible")
+
+        class _RecordingAdapter:
+            def __init__(self):
+                self.seen_temperature = None
+            def structured_chat(self, messages, schema, json_schema=None, code_task=False, temperature_override=None):
+                self.seen_temperature = temperature_override
+                return {"avis": "ok"}
+
+        tmp = Path(tempfile.mkdtemp())
+        # Panne de l'adaptateur : ne doit jamais lever, juste renvoyer un texte d'indisponibilité.
+        avis = skeptical_review(_RaisingAdapter(), objective="t", plan_text="p", workspace=tmp, results=[])
+        self.assertIn("indisponible", avis)
+
+        recorder = _RecordingAdapter()
+        skeptical_review(recorder, objective="t", plan_text="p", workspace=tmp, results=[])
+        self.assertEqual(recorder.seen_temperature, 0.1)
+
+    def test_t34_write_workspace_draft_rejects_oversized_content(self) -> None:
+        # [AJOUTÉ 19/10/2026 — checklist "entrées trop grandes", comparée à
+        # un autre harnais] Aucune limite n'existait sur la taille du
+        # contenu proposé -- un modèle pouvait demander l'écriture de
+        # plusieurs centaines de Mo sans être refusé avant exécution.
+        contract = self._agentic_contract(allowed_paths=["gros.txt"],
+                                          allowed_tools=["write_workspace_draft"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "write_workspace_draft", "arguments": {"path": "gros.txt", "content": "x" * 2_000_000}},
+        ]})
+        with self.assertRaises(PolicyDenied):
+            self.engine.run_with_llm(contract, LlmPlanner(fake))
+
+    def test_t34_execute_python_rejects_oversized_code(self) -> None:
+        contract = self._agentic_contract()
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "execute_python", "arguments": {"code": "# " + "x" * 300_000}},
+        ]})
+        with self.assertRaises(PolicyDenied):
+            self.engine.run_with_llm(contract, LlmPlanner(fake))
+
     def test_t23_fetch_url_outside_allowlist_is_denied(self) -> None:
         contract = self._agentic_contract()
         fake = _FakeAdapter({"operations": [

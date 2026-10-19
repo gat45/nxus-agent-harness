@@ -150,7 +150,8 @@ class LlamaCppAdapter:
                 "total_slots": total_slots, "models": status}
 
     def structured_chat(self, messages: list[dict[str, str]], schema: dict[str, Any],
-                        json_schema: dict[str, Any] | None = None, *, code_task: bool = False) -> dict[str, Any]:
+                        json_schema: dict[str, Any] | None = None, *, code_task: bool = False,
+                        temperature_override: float | None = None) -> dict[str, Any]:
         """`json_schema` (optionnel) : un vrai JSON Schema (type/properties/
         required/enum...), pas le `schema` léger ci-dessus (qui ne sert qu'à
         vérifier après coup la présence des clés requises). Quand fourni,
@@ -183,7 +184,13 @@ class LlamaCppAdapter:
             # premier coup (fonction testée, résultat juste). `code_task`
             # est choisi par l'appelant (voir llm_planner.py), jamais deviné
             # ici depuis le contenu des messages.
-            **self.profile.sampling_params(code_task=code_task),
+            # [AJOUTÉ 19/10/2026] temperature_override : pour une persona
+            # distincte (ex. skeptical_review.py, température basse,
+            # méfiante) sans créer un 3e profil figé dans la dataclass --
+            # seule la température change, le reste du profil (top_k etc.)
+            # reste celui déjà validé.
+            **{**self.profile.sampling_params(code_task=code_task),
+               **({"temperature": temperature_override} if temperature_override is not None else {})},
         }).encode("utf-8")
         request = Request(self.profile.base_url.rstrip("/") + "/v1/chat/completions", data=payload,
                           headers={"Content-Type": "application/json"}, method="POST")

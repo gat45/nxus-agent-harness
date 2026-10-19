@@ -99,6 +99,22 @@ class PolicyEngine:
             return PolicyDecision("deny", "P-CONTRACT-001", "outil absent du contrat")
         if not any(operation.tool_id == tool_id and operation.arguments == arguments for operation in manifest.operations):
             return PolicyDecision("deny", "P-MANIFEST-001", "arguments différents du manifeste approuvé")
+        # [AJOUTÉ 19/10/2026 — angle mort trouvé en comparant notre checklist
+        # de test à celle d'un autre harnais (catégorie "entrées trop
+        # grandes") : AUCUNE limite de taille n'existait sur le contenu
+        # proposé pour write_workspace_draft/execute_python -- un modèle
+        # (ou un futur modèle plus capable, voire compromis) pourrait
+        # proposer plusieurs centaines de Mo de contenu/code et le harnais
+        # l'acceptait tel quel avant exécution. Plafonds arbitraires mais
+        # documentés et largement suffisants pour un brouillon/un script
+        # généré par un LLM (jamais vu dépasser quelques Ko en conditions
+        # réelles cette session).
+        _MAX_DRAFT_CONTENT_CHARS = 1_000_000
+        _MAX_CODE_CHARS = 200_000
+        if tool_id == "write_workspace_draft" and len(arguments.get("content", "")) > _MAX_DRAFT_CONTENT_CHARS:
+            return PolicyDecision("deny", "P-SIZE-001", f"contenu dépasse {_MAX_DRAFT_CONTENT_CHARS} caractères")
+        if tool_id == "execute_python" and len(arguments.get("code", "")) > _MAX_CODE_CHARS:
+            return PolicyDecision("deny", "P-SIZE-002", f"code dépasse {_MAX_CODE_CHARS} caractères")
         if tool_id == "write_workspace_draft":
             raw_path = arguments.get("path", "")
             try:
