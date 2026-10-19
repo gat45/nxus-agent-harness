@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ApprovalGrant",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["grant_id", "actor_id", "run_id", "manifest_hash", "tool_id", "arguments_hash", "expires_at", "nonce", "consumed"],
+  "properties": {
+    "grant_id": {"type": "string"}, "actor_id": {"type": "string"}, "run_id": {"type": "string"},
+    "manifest_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "tool_id": {"type": "string"},
+    "arguments_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "expires_at": {"type": "string", "format": "date-time"},
+    "nonce": {"type": "string"}, "consumed": {"type": "boolean"}
+  }
+}

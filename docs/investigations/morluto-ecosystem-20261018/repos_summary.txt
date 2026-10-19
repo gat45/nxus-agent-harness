@@ -1,0 +1,14 @@
+TOTAL: 255
+originaux: 10 / forks: 245
+
+=== Originaux, tries par mise a jour recente, avec stars/issues ===
+rea                                 stars=320054 issues_ouvertes=1231 langage=TypeScript   maj=2026-10-18T19:10:15Z archive=False
+awesome-reverse-engineering         stars= 809 issues_ouvertes=  1 langage=None         maj=2026-10-18T11:01:19Z archive=False
+leantoken                           stars= 103 issues_ouvertes= 13 langage=Rust         maj=2026-10-17T06:43:45Z archive=False
+morluto                             stars=  81 issues_ouvertes=  0 langage=None         maj=2026-10-15T20:54:05Z archive=False
+generate-social-preview             stars=  34 issues_ouvertes=  1 langage=Shell        maj=2026-10-15T08:29:52Z archive=False
+jacobian                            stars= 298 issues_ouvertes=121 langage=Python       maj=2026-10-13T02:58:44Z archive=False
+smokinggun                          stars=  31 issues_ouvertes= 12 langage=TypeScript   maj=2026-10-12T18:47:23Z archive=False
+flameox                             stars= 208 issues_ouvertes=  1 langage=Python       maj=2026-10-12T09:21:36Z archive=False
+gitcontribute                       stars=  20 issues_ouvertes=  8 langage=Go           maj=2026-09-14T05:14:49Z archive=False
+internalcot                         stars=  19 issues_ouvertes=  0 langage=TypeScript   maj=2026-08-11T22:10:42Z archive=False

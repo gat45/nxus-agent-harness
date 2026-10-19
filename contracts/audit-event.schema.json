@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AuditEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "timestamp", "run_id", "tenant_id", "component", "action", "decision", "details", "previous_hash", "event_hash"],
+  "properties": {
+    "event_id": {"type": "string"}, "timestamp": {"type": "string", "format": "date-time"}, "run_id": {"type": "string"},
+    "tenant_id": {"type": "string"}, "component": {"type": "string"}, "action": {"type": "string"}, "decision": {"type": "string"},
+    "details": {"type": "object"}, "previous_hash": {"type": "string"}, "event_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

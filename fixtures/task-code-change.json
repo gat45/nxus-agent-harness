@@ -1,0 +1,18 @@
+{
+  "task_id": "draft-release-note",
+  "tenant_id": "demo-tenant",
+  "actor_id": "operator-demo",
+  "objective": "Créer un brouillon local et réversible de note de version.",
+  "acceptance_criteria": [
+    "Le brouillon existe dans le workspace du run.",
+    "Le contrôle déclaré draft_exists réussit.",
+    "Aucun réseau, secret, shell ou effet externe n’est utilisé."
+  ],
+  "profile": "CODE_CHANGE",
+  "max_risk": 1,
+  "allowed_paths": ["drafts/release-note.md"],
+  "allowed_tools": ["write_workspace_draft", "run_declared_check"],
+  "data_classification": "synthetic",
+  "budget_seconds": 60,
+  "desired_draft": "# Note de version\n\nBrouillon local, réversible et validé par le harness.\n"
+}

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.venv-jacobian/
+build/
+dist/
+*.egg-info/
+*.spec
+runs/*/*/
+!runs/.gitkeep
+memory/

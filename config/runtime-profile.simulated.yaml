@@ -1,0 +1,12 @@
+profile: P0_SIMULATED_CORE
+status: enabled
+network: disabled
+secrets: disabled
+shell: disabled
+mcp: disabled
+model: simulated
+fixtures_only: true
+notes:
+  - Toute intégration externe doit avoir son propre adaptateur et ses tests de contrat.
+  - Ollama est désactivé par défaut et autorisé uniquement sur loopback dans l’adaptateur optionnel.
+  - llama.cpp (llama-server, modèles GGUF locaux) suit le même contrat : désactivé par défaut, loopback uniquement (voir llama_cpp_adapter.py).

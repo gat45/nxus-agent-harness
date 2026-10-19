@@ -1,0 +1,23 @@
+tools:
+  - id: read_fixture
+    version: '1.0'
+    risk: R0
+    status: enabled
+  - id: retrieve_fixture
+    version: '1.0'
+    risk: R0
+    status: enabled
+  - id: write_workspace_draft
+    version: '1.0'
+    risk: R1
+    status: enabled
+    approval: exact_single_use
+  - id: run_declared_check
+    version: '1.0'
+    risk: R0
+    status: enabled
+  - id: send_external_message
+    version: '1.0'
+    risk: R4
+    status: disabled
+    reason: external action is outside the MVP

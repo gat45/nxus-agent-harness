@@ -1,0 +1,95 @@
+"""Planificateur P0 déterministe et revue de réflexion sans privilèges."""
+from __future__ import annotations
+
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+from .models import PlanManifest, PlannedOperation, RiskLevel, TaskContract, TaskProfile, content_hash, parse_utc, utc_now
+
+
+class SimulatedPlanner:
+    """Produit uniquement des plans dans le périmètre déclaré par le contrat."""
+
+    def create(self, contract: TaskContract, run_id: str, run_dir: Path) -> PlanManifest:
+        now = parse_utc(utc_now())
+        operations: list[PlannedOperation] = []
+        if contract.profile == TaskProfile.CODE_CHANGE:
+            if not contract.allowed_paths:
+                raise ValueError("un changement de code requiert un chemin autorisé")
+            target = contract.allowed_paths[0]
+            operations = [
+                PlannedOperation("op-write-draft", "write_workspace_draft", {"path": target, "content": contract.desired_draft}, RiskLevel.R1, "draft_exists"),
+                PlannedOperation("op-verify-draft", "run_declared_check", {"check": "draft_exists"}, RiskLevel.R0, "draft_exists"),
+            ]
+        else:
+            operations = [PlannedOperation("op-read-corpus", "retrieve_fixture", {"query": contract.objective[:80]}, RiskLevel.R0, "none")]
+        plan = self._render_plan(contract, operations)
+        plan_path = run_dir / "PLAN.md"
+        plan_path.write_text(plan, encoding="utf-8")
+        return PlanManifest(
+            run_id=run_id, task_id=contract.task_id, base_snapshot=content_hash("empty-workspace"),
+            allowed_paths=contract.allowed_paths, allowed_urls=contract.allowed_urls,
+            operations=operations, created_at=now.isoformat(),
+            expires_at=(now + timedelta(minutes=15)).isoformat(), plan_hash=content_hash(plan),
+        )
+
+    @staticmethod
+    def _render_plan(contract: TaskContract, operations: list[PlannedOperation]) -> str:
+        lines = [
+            f"# PLAN — {contract.task_id}", "", "## Objectif", contract.objective, "",
+            "## Critères d’acceptation", *[f"- {criterion}" for criterion in contract.acceptance_criteria], "",
+            "## Périmètre", *[f"- {path}" for path in contract.allowed_paths], "",
+            "## Opérations proposées",
+        ]
+        for operation in operations:
+            lines.append(f"- `{operation.tool_id}` : {operation.arguments} (R{int(operation.risk)}, vérification : {operation.verification})")
+        lines.extend(["", "## Risques et rollback", "- Aucun réseau, secret, shell ou action externe dans le MVP.", "- La seule écriture R1 est réversible : suppression du brouillon dans le workspace de run."])
+        return "\n".join(lines) + "\n"
+
+
+class ReflectionReview:
+    """Vérifie les oublis de plan sans modifier le plan ni accorder d’outil."""
+
+    # [AJOUTÉ 18/10/2026 — finding "needs_validation" du security-audit
+    # skill, run-1] Rien ne plafonnait le NOMBRE d'opérations d'un plan
+    # avant qu'il atteigne AWAITING_APPROVAL : une proposition (venant du
+    # modèle, non fiable) avec des milliers d'opérations aurait généré
+    # autant de grants dans la même boucle approve(), sans aucun rejet de
+    # code. La vraie barrière restait la relecture humaine d'un PLAN.md —
+    # suffisant en CLI un opérateur à la fois, mais pas un contrôle de
+    # code. Plafond arbitraire mais documenté : un plan MVP légitime
+    # (vus en conditions réelles) compte 2 à 4 opérations.
+    MAX_OPERATIONS_PER_PLAN = 50
+
+    @staticmethod
+    def review(contract: TaskContract, manifest: PlanManifest) -> list[str]:
+        issues: list[str] = []
+        if not contract.acceptance_criteria:
+            issues.append("critère d’acceptation absent")
+        if len(manifest.operations) > ReflectionReview.MAX_OPERATIONS_PER_PLAN:
+            issues.append(f"plan a {len(manifest.operations)} opérations, plafond {ReflectionReview.MAX_OPERATIONS_PER_PLAN} dépassé")
+        for operation in manifest.operations:
+            if operation.risk > contract.max_risk:
+                issues.append(f"risque excessif : {operation.tool_id}")
+            if operation.tool_id == "write_workspace_draft" and operation.arguments.get("path") not in contract.allowed_paths:
+                issues.append("écriture hors périmètre")
+        return issues
+
+
+class DevilAdvocate:
+    """Support cognitif : il ne prend aucune décision ni ne déclenche d’action."""
+
+    @staticmethod
+    def challenge(objective: str, assumptions: list[str]) -> dict[str, Any]:
+        return {
+            "objective": objective,
+            "facts_provided": [],
+            "assumptions": assumptions,
+            "objections": [
+                "Quel critère observable prouvera la réussite ?",
+                "Quelle donnée ou permission manque pour exécuter cette tâche de façon sûre ?",
+                "Quel est le rollback concret si le résultat est incorrect ?",
+            ],
+            "status": "decision_support_only",
+        }

@@ -1,0 +1,22 @@
+version: mvp-1.0
+mode: fail-closed
+maximum_risk_level: R1
+network: deny
+shell: deny
+secrets: deny
+mcp: deny
+external_actions: deny
+profiles:
+  CODE_CHANGE:
+    allowed_tools: [read_fixture, retrieve_fixture, write_workspace_draft, run_declared_check]
+    required_approval: [write_workspace_draft]
+  QA_READONLY:
+    allowed_tools: [read_fixture, retrieve_fixture]
+  DECISION_CHALLENGE:
+    allowed_tools: [read_fixture]
+invariants:
+  - manifest_hash_must_match
+  - approvals_are_short_lived_and_single_use
+  - paths_must_be_relative_and_allowlisted
+  - audit_must_be_redacted_and_hash_chained
+  - failed_or_missing_verification_blocks_completion

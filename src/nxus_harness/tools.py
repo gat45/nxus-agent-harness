@@ -1,0 +1,460 @@
+"""Registre fermé et outils simulés du MVP.
+
+Aucun shell, réseau, MCP ou secret n’est fourni ici. Les opérations sont validées
+avant exécution puis à nouveau liées à une approbation pour l’écriture R1.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+import json
+
+from .approvals import ApprovalService
+from .audit import AuditLog
+from .evidence import EvidenceStore
+from .models import Evidence, PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContract, ValidationError, content_hash
+from .policy import PolicyEngine
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    tool_id: str
+    version: str
+    owner: str
+    risk: RiskLevel
+    schema: dict[str, Any]
+    requires_approval: bool
+    enabled: bool = True
+
+
+class ToolRegistry:
+    def __init__(self) -> None:
+        self._tools = {
+            "read_fixture": ToolDefinition("read_fixture", "1.0", "harness", RiskLevel.R0,
+                {"required": ["name"], "properties": {"name": str}, "additional": False}, False),
+            "retrieve_fixture": ToolDefinition("retrieve_fixture", "1.0", "harness", RiskLevel.R0,
+                {"required": ["query"], "properties": {"query": str}, "additional": False}, False),
+            "write_workspace_draft": ToolDefinition("write_workspace_draft", "1.0", "harness", RiskLevel.R1,
+                {"required": ["path", "content"], "properties": {"path": str, "content": str}, "additional": False}, True),
+            "run_declared_check": ToolDefinition("run_declared_check", "1.0", "harness", RiskLevel.R0,
+                {"required": ["check"], "properties": {"check": str}, "additional": False}, False),
+            # Délibérément présent pour vérifier que le MVP refuse les actions R4.
+            "send_external_message": ToolDefinition("send_external_message", "1.0", "harness", RiskLevel.R4,
+                {"required": ["recipient", "body"], "properties": {"recipient": str, "body": str}, "additional": False}, True, False),
+            # [AJOUTÉ 18/10/2026 — R2] execute_python et fetch_url. Risque R2,
+            # approbation exacte requise (comme write_workspace_draft) : le
+            # grant est lié au CODE/URL exact proposé, jamais à "autoriser le
+            # code" en général. Voir docs/threat-model.md pour les limites
+            # connues (pas de sandbox OS, egress non filtré au niveau réseau).
+            "execute_python": ToolDefinition("execute_python", "1.0", "harness", RiskLevel.R2,
+                {"required": ["code"], "properties": {"code": str}, "additional": False}, True),
+            "fetch_url": ToolDefinition("fetch_url", "1.0", "harness", RiskLevel.R2,
+                {"required": ["url"], "properties": {"url": str}, "additional": False}, True),
+            # [AJOUTÉ 18/10/2026 — demandé : pont harnais -> REA] REA
+            # (reverse engineering d'APK/binaires/appareils réels) n'est
+            # PAS un outil que le modèle local peut invoquer en direct --
+            # ce n'est pas un process que execute_python peut lancer, c'est
+            # un outil côté agent Claude, et REA touche de VRAIS artefacts
+            # (device, APK) qu'un modèle non supervisé ne doit jamais piloter
+            # seul. Ce pont est donc ASYNCHRONE et relayé par un humain/Claude :
+            # le modèle peut seulement PROPOSER une question d'analyse (R0,
+            # n'exécute rien), écrite dans rea_requests.jsonl du run. Rien
+            # ne garantit qu'elle sera traitée ni quand -- une mission
+            # future du même tenant verra la réponse (si fournie) comme
+            # entrée de mémoire, jamais comme autorisation.
+            "request_rea_analysis": ToolDefinition("request_rea_analysis", "1.0", "harness", RiskLevel.R0,
+                {"required": ["target", "question"], "properties": {"target": str, "question": str}, "additional": False}, False),
+            # [AJOUTÉ 18/10/2026 — demandé : "integre le sien"] La VRAIE CLI
+            # rea (github.com/morluto/rea, confirmée installée : `rea
+            # --version` -> 6.5.0) existe réellement -- ce n'est plus un
+            # relais asynchrone comme request_rea_analysis ci-dessus, mais un
+            # appel subprocess réel (voir _execute). Risque R1 (comme
+            # write_workspace_draft) : en LECTURE SEULE sur l'artefact
+            # analysé (aucune des sous-commandes autorisées n'installe,
+            # ne flashe, ne pousse ni ne débogue quoi que ce soit -- voir la
+            # liste POLICY._REA_SAFE_SUBCOMMANDS dans policy.py). Grant lié
+            # au (sous-commande, cible) EXACT proposé, comme tout outil R1+.
+            "rea_inspect": ToolDefinition("rea_inspect", "1.0", "harness", RiskLevel.R1,
+                {"required": ["subcommand", "target"], "properties": {"subcommand": str, "target": str}, "additional": False}, True),
+            # [AJOUTÉ 18/10/2026 — demandé : "integre ce qui va nous aider"]
+            # smokinggun (morluto/smokinggun, vérifié installé et testé en
+            # vrai : trouve de vraies alertes `membership-in-loop` dans
+            # notre propre src/, SARIF valide) est un analyseur STATIQUE
+            # confirmé hors-ligne (aucune exécution observée, même garantie
+            # que sa doc). Risque R0 (comme read_fixture/run_declared_check)
+            # : il ne modifie rien et n'exécute jamais la cible analysée —
+            # seule la cible (chemin dans le workspace) est contrainte par
+            # allowed_paths, pas de sous-commande à filtrer (un seul mode :
+            # scan en lecture seule).
+            "smokinggun_scan": ToolDefinition("smokinggun_scan", "1.0", "harness", RiskLevel.R0,
+                {"required": ["target"], "properties": {"target": str}, "additional": False}, False),
+            # [AJOUTÉ 18/10/2026] jacobian (morluto/jacobian, vérifié en vrai :
+            # extended_gcd/Bézout, SAT/SMT via Z3, déterminant de matrice —
+            # tous vérifiés à la main contre le résultat réel, pas une
+            # auto-déclaration du modèle). Risque R0 : opération mathématique
+            # PURE, sans accès fichier/réseau/exécution arbitraire — c'est
+            # exactement le même principe que stdout_matches_file
+            # (comparer contre une vérité indépendante), ici appliqué aux
+            # maths plutôt qu'à un print(). operation_id n'est pas limité à
+            # une allowlist (ce sont des fonctions mathématiques pures, pas
+            # des commandes shell) ; args_json est une chaîne JSON, validée
+            # par jacobian lui-même avant tout calcul.
+            "jacobian_verify": ToolDefinition("jacobian_verify", "1.0", "harness", RiskLevel.R0,
+                {"required": ["operation_id", "args_json"], "properties": {"operation_id": str, "args_json": str}, "additional": False}, False),
+        }
+
+    def get(self, tool_id: str) -> ToolDefinition:
+        if tool_id not in self._tools:
+            raise PolicyDenied("outil inconnu")
+        tool = self._tools[tool_id]
+        if not tool.enabled:
+            raise PolicyDenied("capacité non activée dans le MVP")
+        return tool
+
+    @staticmethod
+    def validate_arguments(tool: ToolDefinition, arguments: dict[str, Any]) -> None:
+        schema = tool.schema
+        if not isinstance(arguments, dict):
+            raise ValidationError("arguments non structurés")
+        extra = set(arguments) - set(schema["properties"])
+        if extra and not schema.get("additional", False):
+            raise ValidationError("champ supplémentaire interdit")
+        missing = set(schema["required"]) - set(arguments)
+        if missing:
+            raise ValidationError("argument requis absent")
+        for name, expected_type in schema["properties"].items():
+            if name in arguments and not isinstance(arguments[name], expected_type):
+                raise ValidationError(f"type invalide pour {name}")
+
+
+class ToolGateway:
+    def __init__(self, *, workspace: Path, fixtures: Path, registry: ToolRegistry,
+                 policy: PolicyEngine, approvals: ApprovalService, audit: AuditLog,
+                 evidence: EvidenceStore | None = None) -> None:
+        self.workspace = workspace.resolve()
+        self.fixtures = fixtures.resolve()
+        self.registry = registry
+        self.policy = policy
+        self.approvals = approvals
+        self.audit = audit
+        # [AJOUTÉ 18/10/2026] Optionnel (None) pour ne pas casser un appelant
+        # existant qui construirait un ToolGateway sans ce paramètre ; sans
+        # evidence, retrieve_fixture renvoie ses correspondances mais ne crée
+        # plus de provenance tracée — RAG réel, piège possible si on l'omet.
+        self.evidence = evidence
+        self.workspace.mkdir(parents=True, exist_ok=True)
+
+    def invoke(self, *, contract: TaskContract, manifest: PlanManifest, state: RunState,
+               actor_id: str, tool_id: str, arguments: dict[str, Any], grant_id: str | None = None,
+               prior_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        tool = self.registry.get(tool_id)
+        self.registry.validate_arguments(tool, arguments)
+        decision = self.policy.authorize(contract=contract, manifest=manifest, state=state,
+                                         tool_id=tool_id, arguments=arguments, tool_risk=tool.risk)
+        self.audit.append("policy", tool_id, decision.outcome,
+                          {"rule": decision.rule_id, "reason": decision.reason, "owasp_llm_risk": decision.owasp_llm_risk})
+        self.policy.require(decision)
+        if tool.requires_approval:
+            if not grant_id:
+                raise PolicyDenied("approbation exacte requise")
+            self.approvals.validate_and_consume(grant_id=grant_id, actor_id=actor_id, run_id=manifest.run_id,
+                                                manifest_hash=manifest.manifest_hash, tool_id=tool_id, arguments=arguments)
+            self.audit.append("approval", "consume", "allow", {"grant_id": grant_id, "tool_id": tool_id})
+        result = self._execute(tool_id, arguments, budget_seconds=contract.budget_seconds, prior_results=prior_results)
+        self.audit.append("gateway", tool_id, "executed", {"result_hash": content_hash(result), "tool_version": tool.version})
+        return result
+
+    def _resolve_workspace_path(self, relative_path: str) -> Path:
+        candidate = (self.workspace / relative_path).resolve()
+        if self.workspace != candidate and self.workspace not in candidate.parents:
+            raise PolicyDenied("résolution de chemin hors workspace")
+        return candidate
+
+    def _execute(self, tool_id: str, arguments: dict[str, Any], *, budget_seconds: int = 60,
+                prior_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if tool_id == "read_fixture":
+            filename = Path(arguments["name"]).name
+            candidate = (self.fixtures / filename).resolve()
+            if self.fixtures not in candidate.parents:
+                raise PolicyDenied("fixture hors répertoire autorisé")
+            return {"content": candidate.read_text(encoding="utf-8"), "untrusted": True}
+        if tool_id == "retrieve_fixture":
+            # [AJOUTÉ 18/10/2026 — RAG local] Avant : matches retournés sans
+            # aucune trace de provenance (contrairement à l'intention du
+            # module evidence.py, déjà présent mais jamais relié ici). Chaque
+            # ligne correspondante devient maintenant une Evidence réelle
+            # (locator = fichier + numéro de ligne), que le caller peut citer
+            # dans un Claim pour que require_valid_claims() la valide
+            # réellement — au lieu de la Evidence de démonstration fixe
+            # ajoutée par HarnessEngine.plan(), sans rapport avec la requête.
+            corpus = self.fixtures / "corpus.md"
+            text = corpus.read_text(encoding="utf-8") if corpus.exists() else ""
+            query = arguments["query"].lower()
+            matches: list[str] = []
+            evidence_ids: list[str] = []
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if query not in line.lower():
+                    continue
+                matches.append(line)
+                if self.evidence is not None:
+                    record = Evidence.create(title="Fixture corpus local", url="local://fixtures/corpus.md",
+                                              locator=f"fixtures/corpus.md#L{line_number}", excerpt=line)
+                    self.evidence.add_evidence(record)
+                    evidence_ids.append(record.evidence_id)
+            return {"query": arguments["query"], "matches": matches, "evidence_ids": evidence_ids, "untrusted": True}
+        if tool_id == "write_workspace_draft":
+            target = self._resolve_workspace_path(arguments["path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(arguments["content"], encoding="utf-8")
+            return {"path": arguments["path"], "content_hash": content_hash(arguments["content"]), "changed": True}
+        if tool_id == "run_declared_check":
+            check = arguments["check"]
+            if check == "draft_exists":
+                found = any(self.workspace.rglob("*.md"))
+                return {"check": check, "exit_code": 0 if found else 1, "passed": found}
+            # [AJOUTÉ 18/10/2026 — trouvé en comparant raisonnement on/off]
+            # "draft_exists" était le SEUL vérificateur possible : aucun moyen
+            # de vérifier le CONTENU d'un résultat produit par execute_python
+            # (ex. "resultat.txt contient 391"), donc AGENTIC_EXECUTION ne
+            # pouvait jamais prouver qu'un calcul était correct, seulement
+            # que le fichier existait au bon endroit. "file_equals:<chemin
+            # relatif au workspace>:<contenu attendu>" comble ça ; reste du
+            # texte simple comme "draft_exists" — pas un nouveau schéma, pour
+            # ne pas élargir la surface d'arguments de l'outil.
+            if check.startswith("file_equals:"):
+                _, _, rest = check.partition(":")
+                relative_path, _, expected = rest.partition(":")
+                target = self._resolve_workspace_path(relative_path)
+                actual = target.read_text(encoding="utf-8").strip() if target.is_file() else None
+                passed = actual == expected
+                return {"check": check, "exit_code": 0 if passed else 1, "passed": passed,
+                       "actual": actual}
+            if check.startswith("stdout_matches_file:"):
+                # [AJOUTÉ 18/10/2026 — trouvé en vrai, scripts/mission_loop.py]
+                # file_equals laisse le modèle choisir LUI-MÊME la valeur
+                # "attendue" : rien n'empêchait d'écrire "1001" dans le fichier
+                # puis de déclarer file_equals:...:1001 — cohérent avec
+                # lui-même, FAUX par rapport au vrai calcul. Reproduit en vrai :
+                # execute_python a calculé 385 (stdout correct), le modèle a
+                # quand même écrit 1001 dans le fichier et validé sa propre
+                # valeur inventée — run COMPLETED, résultat faux. Ce
+                # vérificateur ne laisse plus le modèle fournir AUCUNE valeur
+                # attendue : il compare le fichier à la VRAIE sortie du
+                # DERNIER execute_python déjà exécuté dans ce run — rien à
+                # inventer, rien à mentir sur.
+                _, _, relative_path = check.partition(":")
+                target = self._resolve_workspace_path(relative_path)
+                actual = target.read_text(encoding="utf-8").strip() if target.is_file() else None
+                prior_entry = None
+                for entry in reversed(prior_results or []):
+                    if entry["tool_id"] == "execute_python":
+                        prior_entry = entry
+                        break
+                if prior_entry is None:
+                    return {"check": check, "exit_code": 1, "passed": False,
+                           "actual": actual, "error": "aucun execute_python précédent dans ce run"}
+                # [AJOUTÉ 18/10/2026 — bug réel trouvé en faisant tourner une
+                # vraie mission (Ornith-1.5-9B) : le code proposé plantait
+                # (TypeError sur open(...).write(__doc__), __doc__=None)
+                # avant d'écrire quoi que ce soit — stdout vide ET fichier
+                # jamais écrit (donc lui aussi vide) -> "" == "" -> passed
+                # à tort, run marqué COMPLETED alors que RIEN n'avait
+                # fonctionné. Un crash silencieux ne doit jamais ressembler
+                # à un succès : on exige exit_code 0 ET un stdout non vide
+                # avant même de comparer au fichier.
+                if prior_entry["result"].get("exit_code") != 0:
+                    return {"check": check, "exit_code": 1, "passed": False, "actual": actual,
+                           "error": "le execute_python précédent a échoué (exit_code != 0) : rien à vérifier"}
+                prior_stdout = prior_entry["result"].get("stdout", "").strip()
+                if not prior_stdout:
+                    return {"check": check, "exit_code": 1, "passed": False, "actual": actual,
+                           "error": "le execute_python précédent n'a rien affiché : rien à comparer"}
+                passed = actual == prior_stdout
+                return {"check": check, "exit_code": 0 if passed else 1, "passed": passed,
+                       "actual": actual, "expected_from_stdout": prior_stdout}
+            raise PolicyDenied("vérificateur non déclaré")
+        if tool_id == "execute_python":
+            # [AJOUTÉ 18/10/2026 — R2] Sandbox LOGIQUE, pas matérielle (voir
+            # docs/threat-model.md "Limites connues") : cwd forcé dans le
+            # workspace du run, timeout dur, sortie plafonnée. Ce n'est PAS
+            # une isolation réseau/OS — le code tourne avec les mêmes
+            # privilèges que le process harness. L'approbation exacte
+            # (grant lié au CODE littéral) est la vraie barrière ici, pas
+            # cette sandbox.
+            import os
+            import subprocess
+            import sys
+            timeout = max(1, min(budget_seconds, 60))
+            # [CORRIGÉ 18/10/2026 — bug réel reproduit par test_t33] Deux
+            # bugs distincts de la même famille : (1) notre décodage parent
+            # sans encoding= -> corrigé par encoding="utf-8" ci-dessous ;
+            # (2) le PROCESS ENFANT lui-même utilise cp1252 par défaut pour
+            # SA PROPRE sortie console sur Windows -> un print() affichant
+            # un caractère hors cp1252 plante DANS l'enfant (exit_code != 0,
+            # avant même que notre décodage parent n'entre en jeu). Corrigé
+            # en forçant PYTHONIOENCODING=utf-8 dans l'environnement du
+            # sous-processus, exactement comme pour jacobian_verify.
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-c", arguments["code"]],
+                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True,
+                    env=env, encoding="utf-8", errors="replace",
+                )
+                stdout = proc.stdout[-8000:]
+                stderr = proc.stderr[-4000:]
+                return {"exit_code": proc.returncode, "stdout": stdout, "stderr": stderr, "timed_out": False}
+            except subprocess.TimeoutExpired:
+                return {"exit_code": None, "stdout": "", "stderr": "", "timed_out": True}
+        if tool_id == "fetch_url":
+            # [AJOUTÉ 18/10/2026 — R2] PolicyEngine a déjà validé l'allowlist
+            # exacte + la garde SSRF basique avant d'arriver ici (voir
+            # policy.py P-URL-001/002) ; cette méthode ajoute la limite de
+            # taille de réponse et le marquage untrusted (contenu externe,
+            # jamais une instruction, même pattern que read_fixture).
+            # [CORRIGÉ 18/10/2026 — trouvé en documentant la checklist R2+ ci-
+            # dessus] urlopen() suit les redirections HTTP par défaut : une
+            # URL dans l'allowlist pourrait répondre 302 vers un hôte privé
+            # (ex. l'IP de métadonnées cloud) et PolicyEngine ne revérifie
+            # jamais cette destination, puisqu'elle ne voit que l'URL de
+            # départ. _NoRedirect bloque toute redirection : l'appel échoue
+            # proprement (capturé ci-dessous) plutôt que de la suivre.
+            from urllib.error import HTTPError
+            from urllib.request import HTTPRedirectHandler, build_opener
+
+            class _NoRedirect(HTTPRedirectHandler):
+                def redirect_request(self, *args, **kwargs):
+                    return None
+
+            timeout = max(1, min(budget_seconds, 30))
+            opener = build_opener(_NoRedirect)
+            try:
+                with opener.open(arguments["url"], timeout=timeout) as response:  # nosec B310: validé par policy.py, redirections bloquées
+                    raw = response.read(1_000_000)
+                content = raw.decode("utf-8", errors="replace")
+                return {"url": arguments["url"], "content": content, "truncated": len(raw) >= 1_000_000, "untrusted": True}
+            except HTTPError as exc:
+                exc.close()
+                if exc.code in (301, 302, 303, 307, 308):
+                    return {"url": arguments["url"], "error": "redirection refusée (garde anti-SSRF post-fetch)", "untrusted": True}
+                return {"url": arguments["url"], "error": str(exc), "untrusted": True}
+            except Exception as exc:
+                return {"url": arguments["url"], "error": str(exc), "untrusted": True}
+        if tool_id == "request_rea_analysis":
+            # [AJOUTÉ 18/10/2026] Relais ASYNCHRONE : n'exécute rien, écrit
+            # juste la demande pour qu'un humain/Claude la traite hors de ce
+            # run (voir rea_inspect ci-dessous pour le pont SYNCHRONE réel).
+            request = {"target": arguments["target"], "question": arguments["question"]}
+            requests_path = self.workspace.parent / "rea_requests.jsonl"
+            with requests_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(request, ensure_ascii=False) + "\n")
+            return {"recorded": True, "target": request["target"]}
+        if tool_id == "rea_inspect":
+            # [AJOUTÉ 18/10/2026 — demandé : "integre le sien"] Appel
+            # SUBPROCESS RÉEL vers la vraie CLI `rea` (morluto/rea,
+            # confirmée installée : `rea --version` -> 6.5.0). PolicyEngine
+            # a déjà validé la sous-commande (allowlist lecture seule
+            # _REA_SAFE_SUBCOMMANDS) et la cible (allowed_paths exact) avant
+            # d'arriver ici — même défense en profondeur que fetch_url/
+            # execute_python : le grant est lié au (sous-commande, cible)
+            # EXACT proposé, jamais à "autoriser rea" en général.
+            import os
+            import subprocess
+            timeout = max(1, min(budget_seconds, 60))
+            try:
+                # [CORRIGÉ 18/10/2026 — bug réel reproduit : sur Windows, `rea`
+                # est un wrapper npm (rea.CMD, confirmé via `shutil.which`) --
+                # subprocess.run(["rea", ...]) sans shell=True échoue avec
+                # FileNotFoundError (WinError 2) car CreateProcess ne résout
+                # pas .CMD sans passer par cmd.exe. shell=True corrige ça ;
+                # limité à Windows (POSIX n'a pas ce problème et shell=True
+                # y a une sémantique différente et plus risquée avec une
+                # liste d'arguments). subcommand vient d'une allowlist fixe
+                # (aucun métacaractère possible) et target doit correspondre
+                # EXACTEMENT à une entrée allowed_paths pré-approuvée par
+                # l'opérateur (jamais un texte libre du modèle) — risque
+                # d'injection shell résiduel jugé acceptable pour ces deux
+                # contraintes, au même niveau que execute_python qui exécute
+                # déjà du code arbitraire sous le même grant.
+                proc = subprocess.run(
+                    ["rea", arguments["subcommand"], arguments["target"], "--json"],
+                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True,
+                    shell=(os.name == "nt"),
+                    encoding="utf-8", errors="replace",  # même bug que jacobian (cp1252 par défaut) : du texte APK décodé peut contenir n'importe quel caractère unicode
+                )
+                return {"subcommand": arguments["subcommand"], "target": arguments["target"],
+                       "exit_code": proc.returncode, "stdout": proc.stdout[-8000:],
+                       "stderr": proc.stderr[-2000:], "timed_out": False, "untrusted": True}
+            except subprocess.TimeoutExpired:
+                return {"subcommand": arguments["subcommand"], "target": arguments["target"],
+                       "exit_code": None, "stdout": "", "stderr": "", "timed_out": True, "untrusted": True}
+            except FileNotFoundError:
+                return {"subcommand": arguments["subcommand"], "target": arguments["target"],
+                       "error": "CLI rea introuvable (npm install --global rea-agents requis)", "untrusted": True}
+        if tool_id == "smokinggun_scan":
+            # [AJOUTÉ 18/10/2026] Analyseur STATIQUE confirmé (morluto/
+            # smokinggun, testé en vrai contre src/ de ce projet : 6 vraies
+            # alertes membership-in-loop retrouvées). Jamais d'exécution de
+            # la cible — seule garantie que le projet revendique et qu'on a
+            # vérifiée. shell=True sur Windows pour la même raison que
+            # rea_inspect (wrapper npm .CMD).
+            import os
+            import subprocess
+            timeout = max(1, min(budget_seconds, 60))
+            try:
+                proc = subprocess.run(
+                    ["smokinggun", "scan", arguments["target"], "--format", "sarif"],
+                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True,
+                    shell=(os.name == "nt"),
+                    encoding="utf-8", errors="replace",  # même bug que jacobian (cp1252 par défaut)
+                )
+                return {"target": arguments["target"], "exit_code": proc.returncode,
+                       "stdout": proc.stdout[-8000:], "stderr": proc.stderr[-2000:],
+                       "timed_out": False, "untrusted": True}
+            except subprocess.TimeoutExpired:
+                return {"target": arguments["target"], "exit_code": None, "stdout": "", "stderr": "",
+                       "timed_out": True, "untrusted": True}
+            except FileNotFoundError:
+                return {"target": arguments["target"],
+                       "error": "CLI smokinggun introuvable (npm install -g smokinggun requis)", "untrusted": True}
+        if tool_id == "jacobian_verify":
+            # [AJOUTÉ 18/10/2026] venv dédié .venv-jacobian/ (Python 3.12,
+            # install --only-binary=:all: -- jacobian ne supporte pas
+            # Python 3.14 et sa compilation source échoue sans toolchain
+            # make sur Windows, trouvé en testant en vrai). PYTHONIOENCODING
+            # forcé en utf-8 : jacobian plante sinon sur l'encodage console
+            # Windows par défaut (cp1252) dès qu'une sortie contient un
+            # symbole mathématique (ex. ⊕) -- bug Windows réel reproduit en
+            # testant `jacobian catalog`.
+            import os
+            import subprocess
+            # [CORRIGÉ 18/10/2026 — bug réel trouvé en testant en vrai]
+            # self.fixtures.parent est le PROJECT_ROOT du moteur (voir
+            # HarnessEngine.__init__), qui vaut le dossier racine du run
+            # (ex. mission-workspace/) -- PAS la racine du dépôt
+            # nxus-agent-harness où vit .venv-jacobian/. Résoudre depuis ce
+            # fichier lui-même (src/nxus_harness/tools.py -> racine du
+            # dépôt) marche quel que soit le project_root passé par
+            # l'appelant.
+            repo_root = Path(__file__).resolve().parents[2]
+            jacobian_bin = repo_root / ".venv-jacobian" / "Scripts" / "jacobian.exe"
+            if not jacobian_bin.is_file():
+                jacobian_bin = repo_root / ".venv-jacobian" / "bin" / "jacobian"
+            timeout = max(1, min(budget_seconds, 30))
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+            try:
+                proc = subprocess.run(
+                    [str(jacobian_bin), "run", arguments["operation_id"], "--json", arguments["args_json"]],
+                    cwd=self.workspace, timeout=timeout, capture_output=True, text=True, env=env,
+                    encoding="utf-8", errors="replace",  # décodage parent forcé en utf-8 (pas cp1252) -- même bug que PYTHONIOENCODING côté enfant ; replace plutôt que crash sur un octet malformé
+                )
+                return {"operation_id": arguments["operation_id"], "exit_code": proc.returncode,
+                       "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-2000:], "timed_out": False}
+            except subprocess.TimeoutExpired:
+                return {"operation_id": arguments["operation_id"], "exit_code": None,
+                       "stdout": "", "stderr": "", "timed_out": True}
+            except FileNotFoundError:
+                return {"operation_id": arguments["operation_id"],
+                       "error": "jacobian introuvable (.venv-jacobian/ absent -- voir docs d'installation)"}
+        raise PolicyDenied("implémentation d’outil absente")

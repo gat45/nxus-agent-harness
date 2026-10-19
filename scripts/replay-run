@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -ne 1 ]; then
+  echo "Usage: $0 runs/<tenant>/<run>" >&2
+  exit 2
+fi
+RUN_DIR="$1"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHONPATH="$ROOT/src" python3 -m nxus_harness verify-audit "$RUN_DIR/audit.jsonl"
+echo "Le replay MVP vérifie l’audit ; il ne réexécute pas les outils ni les effets." 

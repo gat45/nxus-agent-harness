@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlanManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "task_id", "base_snapshot", "allowed_paths", "operations", "created_at", "expires_at", "plan_hash"],
+  "properties": {
+    "run_id": {"type": "string"}, "task_id": {"type": "string"}, "base_snapshot": {"type": "string"},
+    "allowed_paths": {"type": "array", "items": {"type": "string"}},
+    "operations": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["operation_id", "tool_id", "arguments", "risk", "verification"], "properties": {"operation_id": {"type": "string"}, "tool_id": {"type": "string"}, "arguments": {"type": "object"}, "risk": {"type": "integer", "minimum": 0, "maximum": 4}, "verification": {"type": "string"}}}},
+    "created_at": {"type": "string", "format": "date-time"}, "expires_at": {"type": "string", "format": "date-time"}, "plan_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
