@@ -129,6 +129,70 @@ class HarnessTestCase(unittest.TestCase):
         outcomes = [proc.communicate(timeout=10)[0].strip() for proc in procs]
         self.assertEqual(outcomes.count("OK"), 1, f"le grant à usage unique a été consommé {outcomes.count('OK')} fois : {outcomes}")
 
+    def test_t46_concurrent_approve_and_run_does_not_double_execute(self) -> None:
+        # [AJOUTÉ 19/10/2026 — REC-05 du cahier des charges, trouvé par un
+        # agent puis REPRODUIT avec deux vrais process séparés. En
+        # corrigeant UNIQUEMENT la perte de grant dans approvals.issue()
+        # (voir ce même jour), le bug sous-jacent plus profond est apparu :
+        # deux process qui appellent resume_run()+approve_and_run() sur le
+        # MÊME run au même instant peuvent tous les deux lire
+        # AWAITING_APPROVAL avant que l'un n'écrive sa transition, passer
+        # _require_state(), et exécuter la MÊME opération non idempotente
+        # deux fois. Reproduit avec un vrai execute_python qui AJOUTE à un
+        # fichier (non idempotent par construction) : avant le verrou de
+        # run (_run_exclusive_lock, engine.py), le fichier contenait
+        # "RAN;RAN;" -- deux écritures réelles pour un run supposé
+        # s'exécuter une fois.
+        import subprocess
+        import sys
+
+        src_dir = str(Path(__file__).resolve().parents[1] / "src")
+        ws_root = self.root / "race-ws"
+        setup_code = (
+            f"import sys; sys.path.insert(0, {src_dir!r})\n"
+            "from pathlib import Path\n"
+            "from nxus_harness.engine import HarnessEngine\n"
+            "from nxus_harness.models import TaskContract, TaskProfile, RiskLevel, PlannedOperation, PlanManifest, content_hash, parse_utc, utc_now\n"
+            "from nxus_harness.planner import SimulatedPlanner\n"
+            "from datetime import timedelta\n"
+            "class _FixedAdapter:\n"
+            "    def create(self, contract, run_id, run_dir):\n"
+            "        ops = [PlannedOperation('op-1', 'execute_python', {'code': \"open('counter.txt','a').write('RAN;')\"}, RiskLevel.R2, 'none')]\n"
+            "        plan = SimulatedPlanner._render_plan(contract, ops)\n"
+            "        (run_dir / 'PLAN.md').write_text(plan, encoding='utf-8')\n"
+            "        now = parse_utc(utc_now())\n"
+            "        return PlanManifest(run_id=run_id, task_id=contract.task_id, base_snapshot=content_hash('x'),\n"
+            "            allowed_paths=contract.allowed_paths, allowed_urls=contract.allowed_urls, operations=ops,\n"
+            "            created_at=now.isoformat(), expires_at=(now+timedelta(minutes=15)).isoformat(), plan_hash=content_hash(plan))\n"
+            f"engine = HarnessEngine(Path({str(ws_root)!r}))\n"
+            "contract = TaskContract(task_id='t', tenant_id='race-tenant', actor_id='op', objective='x',\n"
+            "    acceptance_criteria=['y'], profile=TaskProfile.AGENTIC_EXECUTION, max_risk=RiskLevel.R2,\n"
+            "    allowed_paths=['counter.txt'], allowed_tools=['execute_python'], budget_seconds=10)\n"
+            "context = engine.submit(contract, planner=_FixedAdapter())\n"
+            "print(context.run_id)\n"
+        )
+        run_id = subprocess.run([sys.executable, "-c", setup_code], capture_output=True, text=True, timeout=15).stdout.strip()
+        self.assertTrue(run_id, "échec de la préparation du run")
+
+        race_code = (
+            f"import sys, time; sys.path.insert(0, {src_dir!r})\n"
+            "from pathlib import Path\n"
+            "from nxus_harness.engine import HarnessEngine\n"
+            f"engine = HarnessEngine(Path({str(ws_root)!r}))\n"
+            f"resumed = engine.resume_run('race-tenant', {run_id!r})\n"
+            "time.sleep(0.05)\n"
+            "try:\n"
+            "    engine.approve_and_run(resumed, actor_id='op')\n"
+            "    print('OK')\n"
+            "except Exception as exc:\n"
+            "    print(f'DENIED: {type(exc).__name__}')\n"
+        )
+        procs = [subprocess.Popen([sys.executable, "-c", race_code], stdout=subprocess.PIPE, text=True) for _ in range(2)]
+        outcomes = [proc.communicate(timeout=15)[0].strip() for proc in procs]
+        counter_file = ws_root / "runs" / "race-tenant" / run_id / "workspace" / "counter.txt"
+        content = counter_file.read_text(encoding="utf-8") if counter_file.is_file() else ""
+        self.assertEqual(content, "RAN;", f"execute_python non idempotent exécuté plusieurs fois : {content!r} ; issues des process : {outcomes}")
+
     def test_t05_expired_grant_is_refused(self) -> None:
         service = ApprovalService(self.root / "grants.json")
         grant = service.issue(actor_id="a", run_id="r", manifest_hash="m", tool_id="tool", arguments={"x": 1})

@@ -70,8 +70,24 @@ class ApprovalService:
             actor_id=actor_id, run_id=run_id, manifest_hash=manifest_hash,
             tool_id=tool_id, arguments=arguments, expires_at=expires.isoformat(),
         )
-        self._grants[grant.grant_id] = grant
-        self._save()
+        # [AJOUTÉ 19/10/2026 — faille réelle trouvée par un agent puis
+        # REPRODUITE avec deux vrais process séparés qui appellent
+        # resume_run()+approve_and_run() sur le MÊME run (REC-05) : issue()
+        # n'avait NI verrou NI relecture fraîche -- deux ApprovalService
+        # distincts (un par resume_run()) partent chacun de l'état DISQUE
+        # AU MOMENT DE LEUR CONSTRUCTION (vide, avant tout appel à
+        # approve()), ajoutent leur propre grant en mémoire, puis _save()
+        # écrase le fichier avec SEULEMENT ce que CE process a en mémoire —
+        # le grant du premier process disparaît du disque, écrasé par le
+        # second. Reproduit : exit_code="approbation inconnue" sur le
+        # process dont le grant a été perdu. Même verrou + relecture
+        # fraîche que validate_and_consume(), appliqué ici au moment
+        # d'AJOUTER un grant plutôt que de le consommer.
+        with self._exclusive_lock():
+            if self.path.exists():
+                self._load()
+            self._grants[grant.grant_id] = grant
+            self._save()
         return grant
 
     def validate_and_consume(self, *, grant_id: str, actor_id: str, run_id: str,

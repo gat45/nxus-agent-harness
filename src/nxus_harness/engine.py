@@ -1,10 +1,13 @@
 """Orchestrateur local P0/P1 : transitions, plans, grants, outils, vérification et rapport."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 import json
+import os
+import time
 from uuid import uuid4
 
 from .approvals import ApprovalService
@@ -16,6 +19,40 @@ from .models import (CheckStatus, Evidence, PlanManifest, RunState, TaskContract
 from .planner import ReflectionReview, SimulatedPlanner
 from .policy import PolicyEngine
 from .tools import ToolGateway, ToolRegistry
+
+
+@contextmanager
+def _run_exclusive_lock(run_dir: Path, *, timeout_seconds: float = 10.0) -> Iterator[None]:
+    """[AJOUTÉ 19/10/2026 — faille réelle trouvée par un agent puis
+    REPRODUITE avec deux vrais process séparés (REC-05) : resume_run() +
+    approve_and_run() lus par deux process au même instant pouvaient tous
+    les deux voir AWAITING_APPROVAL (lu depuis le disque avant que l'un ou
+    l'autre ne transitionne), passer le contrôle _require_state(), puis
+    exécuter la MÊME opération non idempotente deux fois -- corriger
+    uniquement la perte de grant dans approvals.issue() (voir ce fichier,
+    même date) a RÉVÉLÉ ce problème plus profond au lieu de le masquer :
+    sans ce verrou, les deux process obtenaient chacun un grant valide et
+    exécutaient tous les deux. Reproduit : counter.txt contenait "RAN;RAN;"
+    (deux écritures réelles d'un execute_python supposé s'exécuter une
+    fois). Même motif de verrou de fichier portable que ApprovalService
+    (O_CREAT|O_EXCL atomique), mais ICI sur tout le cycle vérification
+    d'état → émission des grants → transition, pas seulement l'écriture
+    d'un grant isolé."""
+    lock_path = run_dir / "run.lock"
+    deadline = time.monotonic() + timeout_seconds
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise ValidationError("verrou de run indisponible (contention)")
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        os.close(fd)
+        lock_path.unlink(missing_ok=True)
 
 
 _ALLOWED_TRANSITIONS: dict[RunState, set[RunState]] = {
@@ -117,21 +154,32 @@ class HarnessEngine:
         return manifest
 
     def approve(self, context: RunContext, *, actor_id: str, ttl_seconds: int = 300) -> list[str]:
-        self._require_state(context, RunState.AWAITING_APPROVAL)
-        if actor_id != context.contract.actor_id or context.manifest is None:
-            raise ValidationError("approbateur ou manifeste invalide")
-        grant_ids: list[str] = []
-        registry = ToolRegistry()
-        for operation in context.manifest.operations:
-            definition = registry.get(operation.tool_id)
-            if definition.requires_approval:
-                grant = context.approvals.issue(actor_id=actor_id, run_id=context.run_id,
-                                                 manifest_hash=context.manifest.manifest_hash,
-                                                 tool_id=operation.tool_id, arguments=operation.arguments,
-                                                 ttl_seconds=ttl_seconds)
-                grant_ids.append(grant.grant_id)
-        self._transition(context, RunState.APPROVED, "approve", {"grant_count": len(grant_ids)})
-        return grant_ids
+        # [AJOUTÉ 19/10/2026 — REC-05, bug réel reproduit avec deux process
+        # séparés] Le verrou couvre TOUT le cycle "relire l'état frais ->
+        # vérifier AWAITING_APPROVAL -> émettre les grants -> transitionner
+        # vers APPROVED" : sans lui, deux resume_run() concurrents peuvent
+        # tous les deux lire AWAITING_APPROVAL depuis le disque avant que
+        # l'un des deux n'écrive sa transition, passer _require_state(),
+        # et exécuter la même opération deux fois.
+        with _run_exclusive_lock(context.run_dir):
+            state_path = context.run_dir / "state.json"
+            if state_path.is_file():
+                context.state = RunState(json.loads(state_path.read_text(encoding="utf-8"))["state"])
+            self._require_state(context, RunState.AWAITING_APPROVAL)
+            if actor_id != context.contract.actor_id or context.manifest is None:
+                raise ValidationError("approbateur ou manifeste invalide")
+            grant_ids: list[str] = []
+            registry = ToolRegistry()
+            for operation in context.manifest.operations:
+                definition = registry.get(operation.tool_id)
+                if definition.requires_approval:
+                    grant = context.approvals.issue(actor_id=actor_id, run_id=context.run_id,
+                                                     manifest_hash=context.manifest.manifest_hash,
+                                                     tool_id=operation.tool_id, arguments=operation.arguments,
+                                                     ttl_seconds=ttl_seconds)
+                    grant_ids.append(grant.grant_id)
+            self._transition(context, RunState.APPROVED, "approve", {"grant_count": len(grant_ids)})
+            return grant_ids
 
     def execute(self, context: RunContext, grants: list[str]) -> list[dict[str, Any]]:
         self._require_state(context, RunState.APPROVED)
