@@ -37,6 +37,21 @@ def resolve_public_ips(host: str) -> set[str]:
     return resolved_ips
 
 
+# [AJOUTÉ 19/10/2026 — défense en profondeur signalée par un audit externe]
+# rea_inspect/smokinggun_scan passent par shell=True sur Windows (wrapper
+# npm .CMD, voir tools.py). target doit déjà correspondre EXACTEMENT à une
+# entrée allowed_paths pré-approuvée par l'opérateur -- jamais un texte
+# libre du modèle -- ce qui limite déjà fortement la surface. Cette liste
+# refuse en plus les caractères que l'invite de commandes Windows (cmd.exe)
+# interprète spécialement, au cas où un chemin autorisé en contiendrait
+# par erreur ou qu'une future évolution assouplisse la contrainte exacte.
+_SHELL_METACHARACTERS = frozenset('&|%^"<>()')
+
+
+def _has_shell_metacharacters(value: str) -> bool:
+    return any(char in _SHELL_METACHARACTERS for char in value)
+
+
 _REA_SAFE_SUBCOMMANDS = frozenset({
     "analyze", "inspect", "inspect-artifact", "inspect-binary-layout",
     "inspect-android-package", "inspect-android-class", "inspect-android-method",
@@ -229,10 +244,14 @@ class PolicyEngine:
             target = arguments.get("target", "")
             if target not in manifest.allowed_paths or target not in contract.allowed_paths:
                 return PolicyDecision("deny", "P-REA-002", "cible rea hors périmètre autorisé")
+            if _has_shell_metacharacters(target):
+                return PolicyDecision("deny", "P-REA-003", "cible rea contient un métacaractère shell interdit")
         if tool_id == "smokinggun_scan":
             target = arguments.get("target", "")
             if target not in manifest.allowed_paths or target not in contract.allowed_paths:
                 return PolicyDecision("deny", "P-SCAN-001", "cible smokinggun hors périmètre autorisé")
+            if _has_shell_metacharacters(target):
+                return PolicyDecision("deny", "P-SCAN-002", "cible smokinggun contient un métacaractère shell interdit")
         return PolicyDecision("allow", "P-ALLOW-001", "opération conforme au contrat et au manifeste")
 
     @staticmethod

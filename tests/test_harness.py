@@ -490,6 +490,21 @@ class HarnessTestCase(unittest.TestCase):
             with self.assertRaises(PolicyDenied):
                 self.engine.run_with_llm(contract, LlmPlanner(fake))
 
+    def test_t41_rea_inspect_and_smokinggun_reject_shell_metacharacters_in_target(self) -> None:
+        # [AJOUTÉ 19/10/2026 — défense en profondeur, T9 du rapport d'audit
+        # externe] rea_inspect/smokinggun_scan passent par shell=True sur
+        # Windows -- target est déjà contraint à allowed_paths exact, mais
+        # ce test vérifie en plus qu'un chemin contenant un métacaractère
+        # shell Windows (&, |, %, ^, guillemet, parenthèses) est refusé
+        # même s'il correspondait par ailleurs à allowed_paths.
+        for hostile_target in ["fake.apk & calc", "fake.apk | type secret.txt", 'fake.apk" whoami "']:
+            contract = self._agentic_contract(allowed_paths=[hostile_target], allowed_tools=["rea_inspect", "smokinggun_scan"])
+            for tool_id, args in (("rea_inspect", {"subcommand": "inspect-android-package", "target": hostile_target}),
+                                  ("smokinggun_scan", {"target": hostile_target})):
+                fake = _FakeAdapter({"operations": [{"tool_id": tool_id, "arguments": args}]})
+                with self.assertRaises(PolicyDenied):
+                    self.engine.run_with_llm(contract, LlmPlanner(fake))
+
     def test_t31_rea_inspect_rejects_target_outside_allowlist(self) -> None:
         contract = self._agentic_contract(allowed_paths=["fake.apk"], allowed_tools=["rea_inspect"])
         fake = _FakeAdapter({"operations": [
