@@ -300,7 +300,8 @@ class ToolGateway:
                 matches.append(line)
                 if self.evidence is not None:
                     record = Evidence.create(title="Fixture corpus local", url="local://fixtures/corpus.md",
-                                              locator=f"fixtures/corpus.md#L{line_number}", excerpt=line)
+                                              locator=f"fixtures/corpus.md#L{line_number}", excerpt=line,
+                                              untrusted=True)
                     self.evidence.add_evidence(record)
                     evidence_ids.append(record.evidence_id)
             return {"query": arguments["query"], "matches": matches, "evidence_ids": evidence_ids, "untrusted": True}

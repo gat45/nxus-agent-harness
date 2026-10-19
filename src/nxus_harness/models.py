@@ -303,11 +303,24 @@ class Evidence:
     locator: str
     excerpt: str
     content_hash: str
+    # [AJOUTE 20/10/2026 -- faille reelle trouvee ET REPRODUITE : les outils
+    # qui produisent cette preuve (retrieve_fixture/read_fixture/fetch_url,
+    # voir tools.py) marquent deja leur resultat "untrusted": True dans le
+    # dict renvoye au planificateur -- mais ce drapeau n'avait NULLE PART
+    # ou atterrir sur l'objet Evidence lui-meme, qui n'avait aucun champ de
+    # confiance. Une fois persiste dans evidence.jsonl, "untrusted" etait
+    # perdu pour de bon : validate_claims() ne pouvait alors QUE verifier
+    # la presence d'un evidence_id, jamais sa fiabilite -- une claim
+    # critique pouvait etre validee avec une preuve issue d'une fixture ou
+    # d'une URL externe, exactement comme si elle etait verifiee. Champ
+    # ADDITIF avec defaut (False = fiable) : les lignes .jsonl deja ecrites
+    # restent lisibles sans migration.
+    untrusted: bool = False
 
     @classmethod
-    def create(cls, *, title: str, url: str, locator: str, excerpt: str) -> "Evidence":
+    def create(cls, *, title: str, url: str, locator: str, excerpt: str, untrusted: bool = False) -> "Evidence":
         source_id = content_hash(url)
-        return cls(str(uuid4()), source_id, title, url, utc_now(), locator, excerpt, content_hash(excerpt))
+        return cls(str(uuid4()), source_id, title, url, utc_now(), locator, excerpt, content_hash(excerpt), untrusted)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -16,8 +16,8 @@ from nxus_harness.approvals import ApprovalService
 from nxus_harness.audit import AuditLog, redact
 from nxus_harness.engine import HarnessEngine
 from nxus_harness.evidence import EvidenceStore
-from nxus_harness.models import (Claim, PlanManifest, PlannedOperation, PolicyDenied, RiskLevel, RunState, TaskContract,
-                                 TaskProfile, ValidationError, parse_utc, utc_now)
+from nxus_harness.models import (Claim, Evidence, PlanManifest, PlannedOperation, PolicyDenied, RiskLevel, RunState,
+                                 TaskContract, TaskProfile, ValidationError, parse_utc, utc_now)
 from nxus_harness.llama_cpp_adapter import LlamaCppProfile
 from nxus_harness.llm_planner import LlmPlanner
 from nxus_harness.ollama_adapter import OllamaProfile
@@ -320,6 +320,30 @@ class HarnessTestCase(unittest.TestCase):
         store.add_claim(Claim("claim-1", "affirmation", True, [], "unsupported"))
         with self.assertRaises(ValidationError):
             store.require_valid_claims()
+
+    def test_t61_critical_claim_backed_only_by_untrusted_evidence_fails(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : retrieve_fixture (tools.py) marque son resultat
+        # "untrusted": True dans le dict renvoye au planificateur, mais
+        # l'objet Evidence persiste n'avait AUCUN champ de confiance -- une
+        # claim critique pouvait etre validee avec une preuve issue d'une
+        # fixture non fiable, exactement comme si elle etait verifiee.
+        store = EvidenceStore(self.root / "evidence")
+        untrusted = Evidence.create(title="Fixture", url="local://fixtures/corpus.md",
+                                    locator="fixtures/corpus.md#L1", excerpt="contenu de fixture",
+                                    untrusted=True)
+        store.add_evidence(untrusted)
+        store.add_claim(Claim("claim-1", "affirmation critique", True, [untrusted.evidence_id], "pending"))
+        with self.assertRaises(ValidationError):
+            store.require_valid_claims()
+
+    def test_t61_critical_claim_backed_by_trusted_evidence_passes(self) -> None:
+        store = EvidenceStore(self.root / "evidence")
+        trusted = Evidence.create(title="Mesure réelle", url="local://run/results.json",
+                                  locator="results.json", excerpt="calcul vérifié par le harness")
+        store.add_evidence(trusted)
+        store.add_claim(Claim("claim-1", "affirmation critique", True, [trusted.evidence_id], "pending"))
+        store.require_valid_claims()  # ne doit pas lever
 
     def test_t11_audit_redacts_fixture_secret(self) -> None:
         path = self.root / "audit.jsonl"
