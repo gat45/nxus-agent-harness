@@ -5,7 +5,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from .models import PlanManifest, PlannedOperation, RiskLevel, TaskContract, TaskProfile, content_hash, parse_utc, utc_now
+from .models import (PlanManifest, PlannedOperation, RiskLevel, TaskContract, TaskProfile, content_hash,
+                     flatten_for_markdown, parse_utc, utc_now)
 
 
 class SimulatedPlanner:
@@ -49,8 +50,13 @@ class SimulatedPlanner:
         reconnu qu'en DÉBUT de ligne. Remplacer tout saut de ligne par un
         marqueur visible neutralise toute la classe d'attaque sans avoir
         besoin d'échapper chaque caractère Markdown individuellement (#,
-        backticks, etc. restent inoffensifs au milieu d'une ligne)."""
-        return text.replace("\r\n", " ␤ ").replace("\r", " ␤ ").replace("\n", " ␤ ")
+        backticks, etc. restent inoffensifs au milieu d'une ligne).
+
+        [DEPLACE 20/10/2026] Logique partagée dans models.py
+        (flatten_for_markdown) -- report.md (engine.py) avait la MÊME
+        faille non corrigée ; une seule fonction maintenant, utilisée par
+        les deux fichiers."""
+        return flatten_for_markdown(text)
 
     @classmethod
     def _render_plan(cls, contract: TaskContract, operations: list[PlannedOperation]) -> str:

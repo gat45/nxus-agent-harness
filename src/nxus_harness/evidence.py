@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterable
 import json
 
-from .models import Claim, Evidence, ValidationError
+from .models import Claim, Evidence, ValidationError, flatten_for_markdown
 
 
 class EvidenceStore:
@@ -69,4 +69,14 @@ class EvidenceStore:
         if not self.evidence_path.exists():
             return ""
         entries = [json.loads(line) for line in self.evidence_path.read_text(encoding="utf-8").splitlines() if line]
-        return "\n".join(f"- [{entry['title']}]({entry['url']}) — {entry['locator']} ({entry['collected_at']})" for entry in entries)
+        # [AJOUTE 20/10/2026 -- meme classe de faille deja corrigee pour
+        # PLAN.md/report.md (voir engine.py._render_report, 20/10/2026) :
+        # title/url/locator proviennent de Evidence.create(), lui-meme
+        # alimente par retrieve_fixture/fetch_url (contenu marque
+        # "untrusted" dans tools.py) -- flatten par precaution avant
+        # interpolation dans report.md, qui inclut ce rendu tel quel.
+        return "\n".join(
+            f"- [{flatten_for_markdown(entry['title'])}]({flatten_for_markdown(entry['url'])}) — "
+            f"{flatten_for_markdown(entry['locator'])} ({entry['collected_at']})"
+            for entry in entries
+        )

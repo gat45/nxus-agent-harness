@@ -15,7 +15,8 @@ from .evidence import EvidenceStore
 from .locking import exclusive_file_lock
 from .memory import MemoryStore
 from .models import (CheckStatus, Evidence, PlanManifest, RunState, TaskContract,
-                     ValidationError, VerificationResult, content_hash, require_safe_identifier, utc_now)
+                     ValidationError, VerificationResult, content_hash, flatten_for_markdown,
+                     require_safe_identifier, utc_now)
 from .planner import ReflectionReview, SimulatedPlanner
 from .policy import PolicyEngine
 from .tools import ToolGateway, ToolRegistry
@@ -435,13 +436,29 @@ class HarnessEngine:
 
     @staticmethod
     def _render_report(context: RunContext, results: list[VerificationResult]) -> None:
-        rows = "\n".join(f"| {item.check_id} | {item.status.value} | {item.details or item.evidence} |" for item in results)
+        # [AJOUTE 20/10/2026 -- faille reelle trouvee ET REPRODUITE par un
+        # agent : report.md interpolait contract.objective (et les lignes
+        # de la table de verification) SANS passer par flatten_for_markdown,
+        # alors que PLAN.md avait deja ce correctif pour EXACTEMENT le meme
+        # champ (voir planner.py, 19/10/2026). Un objectif contenant
+        # "\n\n## Etat final : FORGED-COMPLETED-OVERRIDE\n" forgeait une
+        # fausse section dans l'artefact de fin de run lu par un humain --
+        # verifie en vrai (run reel jusqu'a COMPLETED, report.md relu,
+        # fausse ligne d'en-tete confirmee). item.details peut contenir du
+        # texte joint depuis des chemins/claim_ids potentiellement
+        # influences par un outil ; flatten par precaution, meme logique
+        # que PLAN.md (neutraliser toute la classe plutot que le seul
+        # payload reproduit).
+        rows = "\n".join(
+            f"| {item.check_id} | {item.status.value} | {flatten_for_markdown(item.details or item.evidence)} |"
+            for item in results
+        )
         report = f"""# Rapport de run — {context.run_id}
 
 **État final :** `{context.state.value}`
 
 ## Objectif
-{context.contract.objective}
+{flatten_for_markdown(context.contract.objective)}
 
 ## Plan et autorisation
 - Manifeste : `{context.manifest.manifest_hash if context.manifest else 'absent'}`

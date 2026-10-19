@@ -152,6 +152,24 @@ def is_drive_absolute_path(value: str) -> bool:
     return bool(_DRIVE_ABSOLUTE_PATTERN.match(value))
 
 
+# [AJOUTE 20/10/2026 -- deplace depuis planner.py (SimulatedPlanner.
+# _flatten_for_markdown, ajoute le 19/10/2026) vers ce fichier partage :
+# un agent a trouve ET REPRODUIT la MEME faille sur report.md
+# (engine.py._render_report) que celle deja corrigee sur PLAN.md --
+# contract.objective y etait interpole SANS passer par cette fonction,
+# laissant un objectif contenant "\n\n## Etat final : FORGED...\n" forger
+# une fausse section dans l'artefact de fin de run lu par un humain,
+# exactement comme PLAN.md avant son propre correctif. Deux fichiers qui
+# dupliquaient (ou, ici, n'appliquaient qu'a MOITIE) la meme defense
+# auraient fini par diverger -- centralise ici, utilise par planner.py ET
+# engine.py. Logique inchangee : un titre Markdown (## ...) n'est reconnu
+# qu'en DEBUT de ligne, donc remplacer tout saut de ligne par un marqueur
+# visible neutralise toute la classe d'attaque sans echapper chaque
+# caractere Markdown individuellement.
+def flatten_for_markdown(text: str) -> str:
+    return text.replace("\r\n", " ␤ ").replace("\r", " ␤ ").replace("\n", " ␤ ")
+
+
 @dataclass(frozen=True)
 class TaskContract:
     task_id: str
