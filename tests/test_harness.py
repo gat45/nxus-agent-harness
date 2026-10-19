@@ -387,6 +387,26 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual(context.state, RunState.COMPLETED)
         self.assertEqual(context.results[-1]["result"]["expected_from_stdout"], "385")
 
+    def test_t36_qa_readonly_can_reach_jacobian_verify(self) -> None:
+        # [AJOUTÉ 19/10/2026 — biais de conception corrigé] jacobian_verify
+        # est R0 (zéro effet de bord prouvé) mais n'était câblé que sur
+        # AGENTIC_EXECUTION -- une tâche QA_READONLY devait escalader vers
+        # un profil bien plus permissif (R2) juste pour vérifier un calcul.
+        # Ce test échouait avant la correction du profil dans policy.py.
+        contract = TaskContract(
+            task_id="qa-jacobian", tenant_id="tenant-qa", actor_id="operator",
+            objective="Vérifier un calcul.", acceptance_criteria=["calcul vérifié"],
+            profile=TaskProfile.QA_READONLY, max_risk=RiskLevel.R0,
+            allowed_paths=[], allowed_tools=["jacobian_verify"],
+        )
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "jacobian_verify", "arguments": {"operation_id": "integer.compute.extended_gcd", "args_json": "{}"}},
+        ]})
+        try:
+            self.engine.run_with_llm(contract, LlmPlanner(fake))
+        except PolicyDenied as exc:
+            self.fail(f"QA_READONLY aurait dû pouvoir atteindre jacobian_verify : {exc}")
+
     def test_t32_jacobian_verify_registered_r0_and_reachable_via_policy(self) -> None:
         # jacobian_verify appelle un binaire externe (venv dédié, non garanti
         # dans tout environnement de test) -- ce test vérifie seulement le

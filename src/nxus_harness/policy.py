@@ -59,12 +59,26 @@ class PolicyDecision:
 
 class PolicyEngine:
     VERSION = "mvp-1.0"
+    # [CORRIGÉ 19/10/2026 — biais de conception trouvé en relecture : chaque
+    # nouvel outil R0/R1 ajouté cette session (jacobian_verify,
+    # smokinggun_scan, rea_inspect) n'a été câblé que sur AGENTIC_EXECUTION
+    # (le profil utilisé pour les tester), jamais sur les profils dont le
+    # niveau de risque leur correspond réellement -- violation du moindre
+    # privilège : une tâche QA_READONLY/RESEARCH_READONLY qui veut juste
+    # vérifier un calcul (jacobian_verify, R0, zéro effet de bord prouvé)
+    # devait escalader vers AGENTIC_EXECUTION, qui débloque AUSSI
+    # execute_python/fetch_url (R2) -- bien plus que nécessaire. jacobian_verify
+    # et smokinggun_scan (tous deux R0, sans accès fichier/réseau/exécution
+    # arbitraire, vérifiés en conditions réelles) sont maintenant disponibles
+    # partout où un outil R0 de lecture l'est déjà ; smokinggun_scan rejoint
+    # aussi SECURITY_REVIEW, dont c'est exactement l'usage prévu.
     _profile_tools = {
-        TaskProfile.QA_READONLY: {"read_fixture", "retrieve_fixture"},
-        TaskProfile.DECISION_CHALLENGE: {"read_fixture"},
-        TaskProfile.RESEARCH_READONLY: {"read_fixture", "retrieve_fixture"},
-        TaskProfile.CODE_CHANGE: {"read_fixture", "retrieve_fixture", "write_workspace_draft", "run_declared_check"},
-        TaskProfile.SECURITY_REVIEW: {"read_fixture", "run_declared_check"},
+        TaskProfile.QA_READONLY: {"read_fixture", "retrieve_fixture", "jacobian_verify"},
+        TaskProfile.DECISION_CHALLENGE: {"read_fixture", "jacobian_verify"},
+        TaskProfile.RESEARCH_READONLY: {"read_fixture", "retrieve_fixture", "jacobian_verify", "smokinggun_scan"},
+        TaskProfile.CODE_CHANGE: {"read_fixture", "retrieve_fixture", "write_workspace_draft", "run_declared_check",
+                                  "jacobian_verify", "smokinggun_scan"},
+        TaskProfile.SECURITY_REVIEW: {"read_fixture", "run_declared_check", "smokinggun_scan"},
         TaskProfile.EXTERNAL_ACTION: set(),
         # [AJOUTÉ 18/10/2026 — R2] Seul profil avec execute_python/fetch_url.
         # Il reprend aussi les outils R0/R1 (brouillon, vérification) : une
