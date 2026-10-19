@@ -69,6 +69,35 @@ class HarnessTestCase(unittest.TestCase):
         self.assertTrue((context.workspace / "drafts/test.md").exists())
         self.assertTrue(AuditLog.verify(context.run_dir / "audit.jsonl")[0])
 
+    def test_t48_verify_audit_cli_detects_valid_and_tampered_logs(self) -> None:
+        # [AJOUTÉ 19/10/2026 — DB-09 du cahier des charges : "vérification
+        # d'intégrité". scripts/verify-audit-chain et sa commande sous-
+        # jacente `python -m nxus_harness verify-audit` existaient déjà
+        # mais n'étaient jamais exercés par la suite -- seule l'API Python
+        # AuditLog.verify() l'était. Vérifié en vrai (pas en lisant le
+        # code) : marche sur un journal valide ET détecte une altération
+        # d'une ligne existante (pas juste une ligne manquante).
+        import subprocess
+        import sys
+
+        context = self.engine.run_demo(self.contract())
+        audit_path = context.run_dir / "audit.jsonl"
+        src_dir = str(Path(__file__).resolve().parents[1] / "src")
+
+        valid = subprocess.run([sys.executable, "-m", "nxus_harness", "verify-audit", str(audit_path)],
+                               capture_output=True, text=True, env={**__import__("os").environ, "PYTHONPATH": src_dir})
+        self.assertEqual(valid.returncode, 0)
+        self.assertIn('"valid": true', valid.stdout)
+
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        lines[1] = lines[1].replace('"allow"', '"deny"')
+        tampered_path = self.root / "tampered_audit.jsonl"
+        tampered_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tampered = subprocess.run([sys.executable, "-m", "nxus_harness", "verify-audit", str(tampered_path)],
+                                  capture_output=True, text=True, env={**__import__("os").environ, "PYTHONPATH": src_dir})
+        self.assertEqual(tampered.returncode, 1)
+        self.assertIn('"valid": false', tampered.stdout)
+
     def test_t03_hostile_fixture_stays_untrusted(self) -> None:
         context = self.engine.run_demo(self.contract(profile=TaskProfile.RESEARCH_READONLY))
         self.assertEqual(context.state, RunState.COMPLETED)
