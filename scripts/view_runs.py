@@ -63,6 +63,7 @@ class RunsHandler(BaseHTTPRequestHandler):
     mission_tenant: str
     mission_allowed_paths: list[str]
     mission_allowed_urls: list[str]
+    mission_token: str | None = None  # None = pas d'authentification (loopback local uniquement)
     _mission_lock = threading.Lock()  # une mission a la fois : execute_python est synchrone
     _mission_counter = 0
 
@@ -97,9 +98,22 @@ class RunsHandler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] != "/mission":
             self._send_html(404, "<h1>404</h1>")
             return
+        # [AJOUTÉ 19/10/2026 — signalé P1 conditionnel par un audit externe]
+        # "Le visualiseur n'implémente pas d'authentification visible" --
+        # exact. mission_token (optionnel, None par défaut = comportement
+        # inchangé en loopback local) : si configuré, le POST doit fournir
+        # le même jeton via l'en-tête X-Mission-Token, sinon refus 401
+        # avant même de lire le corps de la requête.
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8") if length else ""
         fields = urllib.parse.parse_qs(body)
+        if self.mission_token is not None:
+            # Accepté via en-tête (clients API/CLI) OU champ de formulaire caché
+            # (le formulaire HTML de /live ne peut pas poser d'en-tête sans JS).
+            provided = self.headers.get("X-Mission-Token") or (fields.get("token") or [""])[0]
+            if provided != self.mission_token:
+                self._send_html(401, "<h1>401 — jeton manquant ou invalide</h1>")
+                return
         objective = (fields.get("objective") or [""])[0].strip()
         if not objective:
             self._send_html(400, "<h1>400 — objectif vide</h1>")
@@ -236,6 +250,9 @@ class RunsHandler(BaseHTTPRequestHandler):
             except (json.JSONDecodeError, TypeError, KeyError):
                 pass
 
+        token_field_html = (f'<input type="hidden" name="token" value="{html.escape(self.mission_token)}">'
+                           if self.mission_token else "")
+
         done_states = {"COMPLETED", "FAILED", "ABORTED", "BLOCKED", "REJECTED", "EXPIRED",
                       "COMPLETED_WITH_LIMITS", "COMPLETED_WITH_RESERVATIONS"}
         refresh = "" if current_state in done_states else '<meta http-equiv="refresh" content="1.5">'
@@ -246,6 +263,7 @@ class RunsHandler(BaseHTTPRequestHandler):
 <h1>En direct</h1>
 <p><a href="/">&laquo; tous les runs</a></p>
 <form method="POST" action="/mission" style="margin:12px 0;display:flex;gap:8px;">
+  {token_field_html}
   <input name="objective" placeholder="Donner un ordre au modele local..." required
          style="flex:1;padding:8px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;">
   <button type="submit" style="padding:8px 16px;background:#2d5;color:#111;border:none;border-radius:4px;font-weight:600;">Lancer</button>
@@ -319,8 +337,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--host", default="127.0.0.1",
-                        help="Loopback par defaut. Changer n'ouvre PAS de capacite d'ecriture : "
-                             "ce frontend reste lecture seule quel que soit l'host.")
+                        help="Loopback par defaut. [CORRIGE 19/10/2026 -- ce "
+                             "commentaire mentait depuis l'ajout de POST /mission (18/10) : ce "
+                             "frontend n'est PLUS lecture seule, POST /mission soumet de vraies "
+                             "missions au modele local. Elargir --host SANS --mission-token "
+                             "expose cette ecriture a quiconque atteint ce port ; refuse au demarrage.")
+    parser.add_argument("--mission-token", default=None,
+                        help="[AJOUTE 19/10/2026 -- signale par un audit externe : aucune "
+                             "authentification n'existait sur POST /mission] Jeton partage "
+                             "requis pour soumettre une mission (en-tete X-Mission-Token ou champ "
+                             "cache du formulaire). Obligatoire si --host sort du loopback.")
     parser.add_argument("--root", default=".")
     parser.add_argument("--model", default="q38_9b_s3_gutop.gguf", help="modele servi par llama-server pour les missions lancées depuis /live")
     parser.add_argument("--llm-base-url", default="http://127.0.0.1:8080")
@@ -329,6 +355,11 @@ def main() -> int:
     parser.add_argument("--allowed-urls", nargs="*", default=["https://example.com/", "https://html.duckduckgo.com/html/"])
     args = parser.parse_args()
 
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not args.mission_token:
+        parser.error("--host hors loopback exige --mission-token (POST /mission exécute de vraies missions, "
+                     "voir docs/threat-model.md) -- refuse de démarrer sans authentification.")
+
+    RunsHandler.mission_token = args.mission_token
     RunsHandler.runs_root = (Path(args.root) / "runs").resolve()
     # [AJOUTÉ 18/10/2026] même engine que mission_loop.py, partagé par tout
     # le process HTTP : la mémoire inter-run (engine.memory) accumule aussi
