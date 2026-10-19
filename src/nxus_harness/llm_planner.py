@@ -23,7 +23,7 @@ import ast
 from .llama_cpp_adapter import LlamaCppAdapter
 from .memory import MemoryStore
 from .models import DEFAULT_DESIRED_DRAFT, PlanManifest, PlannedOperation, TaskContract, ValidationError, content_hash, parse_utc, utc_now
-from .planner import SimulatedPlanner
+from .planner import ReflectionReview, SimulatedPlanner
 from .tools import ToolRegistry
 
 
@@ -311,6 +311,20 @@ class LlmPlanner:
         proposed = raw.get("operations")
         if not isinstance(proposed, list) or not proposed:
             raise ValidationError("le modèle n'a proposé aucune opération valide")
+        # [AJOUTE 20/10/2026 -- angle mort trouve par un agent puis verifie
+        # en vrai : ReflectionReview.MAX_OPERATIONS_PER_PLAN (planner.py)
+        # ne s'applique qu'APRES le retour de cette methode -- avant ce
+        # rejet, _syntax_errors() ci-dessous fait tourner ast.parse() sur
+        # CHAQUE operation execute_python, et la boucle de construction du
+        # manifeste plus bas construit un PlannedOperation par item. Mesure
+        # en vrai : 10 000 operations execute_python (~2 Ko de code chacune)
+        # -> ~5s de ast.parse() pur, entierement gaspilles puisque le plan
+        # est garanti d'etre rejete quelques instants plus tard par ce
+        # meme plafond. Rejet IMMEDIAT, avant tout travail couteux, avec le
+        # meme plafond que ReflectionReview (reutilise, pas duplique).
+        if len(proposed) > ReflectionReview.MAX_OPERATIONS_PER_PLAN:
+            raise ValidationError(
+                f"le modèle a proposé {len(proposed)} opérations, plafond {ReflectionReview.MAX_OPERATIONS_PER_PLAN} dépassé")
         syntax_errors = self._syntax_errors(proposed)
         if syntax_errors:
             if max_retries > 0:

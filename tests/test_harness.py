@@ -959,17 +959,53 @@ class HarnessTestCase(unittest.TestCase):
         ]})
         with self.assertRaises(ValidationError):
             self.engine.run_with_llm(contract, LlmPlanner(fake))
-        # [AJOUTÉ 19/10/2026 — ENG-04, trouvé par un agent en comparant
-        # chaque RunState aux assertions réelles] plan() transitionne vers
-        # REFLECTION_REVIEW puis lève ValidationError SANS aucune autre
-        # transition -- contrairement à submit() (qui force ABORTED sur
-        # toute exception, voir engine.py), run_with_llm() n'a pas ce
-        # filet. Le run reste donc VRAIMENT au repos en REFLECTION_REVIEW,
-        # jamais vérifié avant que ce test ne lise state.json.
+        # [MIS A JOUR 20/10/2026 -- angle mort trouve par un agent puis
+        # verifie en vrai : avant ce jour, LlmPlanner._propose_operations()
+        # n'avait AUCUN plafond propre, laissant ReflectionReview (stade
+        # REFLECTION_REVIEW) etre le SEUL endroit qui rejetait un plan
+        # surdimensionne -- mais pas avant d'avoir fait tourner
+        # ast.parse() sur CHAQUE operation execute_python et construit un
+        # PlannedOperation par item (mesure : ~5s de travail gaspille pour
+        # 10 000 operations, garanti rejete juste apres). LlmPlanner
+        # reutilise maintenant EXACTEMENT le meme plafond
+        # (ReflectionReview.MAX_OPERATIONS_PER_PLAN) mais le verifie
+        # IMMEDIATEMENT apres la reponse du modele, dans create() -- donc
+        # AVANT la transition vers REFLECTION_REVIEW. L'etat au repos est
+        # maintenant DRAFTING_PLAN, pas REFLECTION_REVIEW : rejet plus tot
+        # pour le meme plafond, pas un plafond different.
         runs = list((self.engine.runs_root / contract.tenant_id).iterdir())
         self.assertEqual(len(runs), 1)
         state = json.loads((runs[0] / "state.json").read_text(encoding="utf-8"))["state"]
-        self.assertEqual(state, "REFLECTION_REVIEW")
+        self.assertEqual(state, "DRAFTING_PLAN")
+
+    def test_t67_llm_planner_rejects_oversized_plan_before_parsing_any_code(self) -> None:
+        # [AJOUTE 20/10/2026 -- angle mort trouve par un agent puis verifie
+        # en vrai : avant ce correctif, _propose_operations() faisait
+        # tourner ast.parse() sur CHAQUE operation execute_python AVANT que
+        # ReflectionReview (plus tard dans le pipeline) ne rejette un plan
+        # surdimensionne -- mesure : ~5s de travail gaspille pour 10 000
+        # operations de ~2 Ko de code chacune, garanti rejete juste apres.
+        # Ce test utilise un nombre plus modeste (assez pour mesurer un
+        # delta de temps net si le plafond etait absent, sans ralentir la
+        # suite) et verifie surtout le COMPORTEMENT : rejet propre, pas de
+        # crash, sans necessiter 10 000 iterations dans la suite de tests.
+        from nxus_harness.planner import ReflectionReview
+        too_many = ReflectionReview.MAX_OPERATIONS_PER_PLAN + 1
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "execute_python", "arguments": {"code": "x = 1\n" * 500}} for _ in range(too_many)
+        ]})
+        planner = LlmPlanner(fake)
+        start = time.monotonic()
+        with self.assertRaises(ValidationError) as ctx:
+            planner._propose_operations(
+                self._agentic_contract(allowed_tools=["execute_python"]), max_retries=1)
+        elapsed = time.monotonic() - start
+        self.assertIn("opérations", str(ctx.exception))
+        # Avant le correctif, ce meme appel aurait d'abord fait tourner
+        # ast.parse() sur chacune des `too_many` operations (51 ici, donc
+        # le delta est modeste a cette echelle -- la mesure reelle a 10 000
+        # operations par l'agent est la preuve a l'echelle, pas ce seuil).
+        self.assertLess(elapsed, 2.0)
 
     def test_t27_stdout_matches_file_rejects_silent_crash_as_empty_vs_empty(self) -> None:
         # [AJOUTÉ 18/10/2026 — bug réel trouvé via une vraie mission
