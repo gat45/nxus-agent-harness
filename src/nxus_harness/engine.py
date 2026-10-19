@@ -198,6 +198,17 @@ class HarnessEngine:
         # l'EMPLACEMENT de l'écriture, jamais son CONTENU. Reproduit en vrai :
         # 2 essais sur 4 ont fini COMPLETED avec un resultat.txt incorrect.
         requires_declared_check = context.contract.profile.value in ("CODE_CHANGE", "AGENTIC_EXECUTION")
+        # [TENTÉ PUIS ANNULÉ le 19/10/2026 — VER-09 du cahier des charges
+        # ("statut indéterminé si preuves insuffisantes") avait motivé
+        # l'idée d'utiliser CheckStatus.UNKNOWN ici (déclaré dans
+        # l'énumération mais jamais assigné nulle part). Vérifié avant de
+        # committer : les TROIS branches de run_declared_check (tools.py)
+        # renvoient TOUJOURS une clé "passed" (jamais seulement "error")
+        # -- ce chemin "insuffisant pour conclure" n'est donc atteignable
+        # par AUCUN appel réel avec le code actuel. Un correctif sans bug
+        # réel derrière contredit la règle tenue tout le long de cette
+        # session (jamais de changement sans reproduction) : annulé plutôt
+        # que laissé comme code mort déguisé en correctif.
         passed = bool(check_results and check_results[-1]["result"].get("passed"))
         check_status = (CheckStatus.PASS if passed else CheckStatus.NOT_RUN) if requires_declared_check else CheckStatus.NOT_APPLICABLE
         check_details = "run_declared_check doit être exécuté et réussi" if requires_declared_check else "profil sans écriture : contrôle non applicable"
