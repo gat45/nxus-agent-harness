@@ -619,6 +619,26 @@ class HarnessTestCase(unittest.TestCase):
         self.assertFalse(result["timed_out"])
         self.assertLess(elapsed, 10, "le process aurait dû être tué bien avant le budget complet")
 
+    def test_t42_shell_true_kills_the_whole_process_tree_not_just_the_shell(self) -> None:
+        # [AJOUTÉ 19/10/2026 — REC-06, bug réel reproduit] Avec shell=True
+        # (rea_inspect/smokinggun_scan sur Windows), le process direct est
+        # cmd.exe, qui lance le vrai outil comme petit-fils. L'ancien ordre
+        # (proc.kill() PUIS taskkill /T) tuait cmd.exe d'abord -- taskkill
+        # échouait ensuite avec "processus introuvable" (reproduit : code
+        # retour 128) et le petit-fils survivait. Preuve sans dépendre d'un
+        # outil d'inspection de process externe : le petit-fils, s'il
+        # survit, écrit un fichier marqueur 2s après son lancement ; on
+        # coupe à 0.5s et on vérifie que ce fichier n'apparaît JAMAIS, même
+        # en attendant plus longtemps que les 2s complètes.
+        import time
+        from nxus_harness.tools import _run_capped
+        marker = self.root / "descendant_alive.marker"
+        code = f"import time; time.sleep(2); open(r'{marker}', 'w').write('alive')"
+        result = _run_capped(["python", "-c", code], cwd=self.root, timeout=0.5, shell=(__import__("os").name == "nt"))
+        self.assertTrue(result["timed_out"])
+        time.sleep(2.5)  # plus long que le sleep(2) du petit-fils, pour laisser une chance a un survivant d'ecrire
+        self.assertFalse(marker.exists(), "le petit-fils a survécu et a écrit son marqueur -- l'arbre n'a pas été tué")
+
     def test_t40_kill_switch_terminates_running_subprocess_before_its_timeout(self) -> None:
         # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
         # PolicyEngine.stop() positionnait seulement un bool consulté lors

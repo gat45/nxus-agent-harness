@@ -19,6 +19,35 @@ from .models import Evidence, PlanManifest, PolicyDenied, RiskLevel, RunState, T
 from .policy import PolicyEngine
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """[AJOUTÉ 19/10/2026 — REC-06 du cahier des charges, reproduit en vrai]
+    proc.kill() ne termine QUE le process direct -- avec shell=True (rea_inspect/
+    smokinggun_scan sur Windows), ce process direct est cmd.exe, qui a lui-même
+    lancé le VRAI outil comme petit-fils. Tuer cmd.exe laisse ce petit-fils
+    tourner. Reproduit : un `python -c "time.sleep(15)"` lancé via shell=True,
+    puis proc.kill() sur l'objet Popen -- le vrai process python.exe était
+    toujours vivant après. os.name == "nt" : `taskkill /T /F` termine tout
+    l'arbre -- MAIS seulement si le PID racine est ENCORE VIVANT à l'appel :
+    testé avec proc.kill() AVANT taskkill, qui échoue alors avec "processus
+    introuvable" (code 128) et n'atteint jamais le petit-fils, erreur
+    avalée silencieusement par l'ancien code. taskkill doit donc s'exécuter
+    EN PREMIER, tant que cmd.exe est vivant pour que `/T` remonte son arbre ;
+    proc.kill() ensuite ne sert qu'en repli (taskkill absent). POSIX :
+    proc.kill() seul suffit déjà (aucun appel de ce module n'utilise
+    shell=True sur POSIX, donc pas de cmd shell intermédiaire à traverser)."""
+    import os
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, str] | None = None,
                 shell: bool = False, max_stdout: int = 8000, max_stderr: int = 4000,
                 cancel_event: Event | None = None) -> dict[str, Any]:
@@ -50,7 +79,7 @@ def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, st
                 if len(buffers[key]) > cap:
                     buffers[key] = buffers[key][-cap:]
                     overflowed[key] = True
-                    proc.kill()
+                    _kill_tree(proc)
                     break
         except Exception:
             pass
@@ -71,13 +100,13 @@ def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, st
         def _watch_cancel() -> None:
             if cancel_event.wait(timeout=timeout):
                 cancelled["flag"] = True
-                proc.kill()
+                _kill_tree(proc)
         Thread(target=_watch_cancel, daemon=True).start()
     try:
         proc.wait(timeout=timeout)
         timed_out = False
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_tree(proc)
         proc.wait()
         timed_out = True
     for reader in readers:
