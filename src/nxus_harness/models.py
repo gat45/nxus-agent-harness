@@ -97,6 +97,18 @@ def parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+# [AJOUTÉ 19/10/2026 — trouvé en relisant models.py/llm_planner.py après
+# les correctifs de concurrence du jour] Cette chaîne était dupliquée TROIS
+# fois, codée en dur indépendamment dans TaskContract (deux fois ici) et
+# dans llm_planner.py (comparaison pour décider d'afficher ou non
+# desired_draft comme un vrai contenu demandé -- voir ce fichier, 18/10/2026,
+# le bug réel qui avait fait échouer une mission SSRF en recopiant ce texte
+# tel quel). Si quelqu'un changeait ce défaut ici sans toucher la
+# comparaison codée en dur dans llm_planner.py, ce bug reviendrait en
+# silence. Une seule constante nommée, importée là où elle est comparée.
+DEFAULT_DESIRED_DRAFT = "Brouillon contrôlé par le harness."
+
+
 @dataclass(frozen=True)
 class TaskContract:
     task_id: str
@@ -115,7 +127,7 @@ class TaskContract:
     allowed_urls: list[str] = field(default_factory=list)
     data_classification: str = "synthetic"
     budget_seconds: int = 60
-    desired_draft: str = "Brouillon contrôlé par le harness."
+    desired_draft: str = DEFAULT_DESIRED_DRAFT
 
     def validate(self) -> None:
         if not self.task_id or not self.tenant_id or not self.actor_id:
@@ -146,7 +158,7 @@ class TaskContract:
                 allowed_urls=list(value.get("allowed_urls", [])),
                 data_classification=value.get("data_classification", "synthetic"),
                 budget_seconds=int(value.get("budget_seconds", 60)),
-                desired_draft=value.get("desired_draft", "Brouillon contrôlé par le harness."),
+                desired_draft=value.get("desired_draft", DEFAULT_DESIRED_DRAFT),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValidationError("TaskContract invalide") from exc

@@ -425,6 +425,39 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual(len(self.engine.memory.recall("tenant-x")), 1)
         self.assertEqual(len(self.engine.memory.recall("tenant-y")), 0)
 
+    def test_t49_desired_draft_placeholder_never_shown_as_real_content(self) -> None:
+        # [AJOUTÉ 19/10/2026 — verrou contre une régression silencieuse]
+        # DEFAULT_DESIRED_DRAFT est maintenant une constante unique
+        # (models.py) importée par llm_planner.py pour décider d'afficher
+        # ou non desired_draft comme un contenu réel. Avant ce
+        # regroupement, c'était une chaîne dupliquée codée en dur à 3
+        # endroits -- un futur changement du défaut dans TaskContract sans
+        # mise à jour de la comparaison aurait fait réapparaître en
+        # silence le bug réel qui avait fait échouer une mission SSRF
+        # cette session (le modèle recopiait le placeholder comme s'il
+        # s'agissait d'un vrai contenu demandé).
+        from nxus_harness.models import DEFAULT_DESIRED_DRAFT
+
+        contract_default = self._agentic_contract(allowed_tools=["write_workspace_draft"])
+        self.assertEqual(contract_default.desired_draft, DEFAULT_DESIRED_DRAFT)
+        fake_default = _FakeAdapter({"operations": [
+            {"tool_id": "write_workspace_draft", "arguments": {"path": contract_default.allowed_paths[0] if contract_default.allowed_paths else "x", "content": "x"}},
+        ]})
+        LlmPlanner(fake_default)._propose_operations(contract_default)
+        prompt_default = fake_default.last_messages[-1]["content"]
+        self.assertNotIn(DEFAULT_DESIRED_DRAFT, prompt_default)
+        self.assertIn("Aucun contenu pre-rempli", prompt_default)
+
+        contract_custom = self._agentic_contract(allowed_tools=["write_workspace_draft"])
+        from dataclasses import replace
+        contract_custom = replace(contract_custom, desired_draft="# Contenu vraiment demande")
+        fake_custom = _FakeAdapter({"operations": [
+            {"tool_id": "write_workspace_draft", "arguments": {"path": "x", "content": "x"}},
+        ]})
+        LlmPlanner(fake_custom)._propose_operations(contract_custom)
+        prompt_custom = fake_custom.last_messages[-1]["content"]
+        self.assertIn("# Contenu vraiment demande", prompt_custom)
+
     def test_t19_llm_planner_includes_memory_context_in_prompt(self) -> None:
         # Le contexte mémoire doit apparaître dans le message envoyé au
         # modèle (ce que _memory_context() construit), sans jamais court-

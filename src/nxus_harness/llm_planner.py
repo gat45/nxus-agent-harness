@@ -21,7 +21,7 @@ import ast
 
 from .llama_cpp_adapter import LlamaCppAdapter
 from .memory import MemoryStore
-from .models import PlanManifest, PlannedOperation, TaskContract, ValidationError, content_hash, parse_utc, utc_now
+from .models import DEFAULT_DESIRED_DRAFT, PlanManifest, PlannedOperation, TaskContract, ValidationError, content_hash, parse_utc, utc_now
 from .planner import SimulatedPlanner
 from .tools import ToolRegistry
 
@@ -259,7 +259,7 @@ class LlmPlanner:
                 # On ne montre cette ligne que si un contenu a VRAIMENT été
                 # demandé (différent du texte générique par défaut).
                 + (f"Contenu souhaite (si pertinent pour write_workspace_draft): {contract.desired_draft!r}"
-                   if contract.desired_draft != "Brouillon contrôlé par le harness." else
+                   if contract.desired_draft != DEFAULT_DESIRED_DRAFT else
                    "Aucun contenu pre-rempli fourni : deduis le contenu de write_workspace_draft "
                    "UNIQUEMENT depuis l'objectif ci-dessus.")
                 # [AJOUTÉ 18/10/2026] Injecté uniquement lors d'une relance
