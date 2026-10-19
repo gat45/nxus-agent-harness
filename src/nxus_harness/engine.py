@@ -259,7 +259,27 @@ class HarnessEngine:
         # que le fichier produit restait dans allowed_paths — "scope" vérifie
         # l'EMPLACEMENT de l'écriture, jamais son CONTENU. Reproduit en vrai :
         # 2 essais sur 4 ont fini COMPLETED avec un resultat.txt incorrect.
-        requires_declared_check = context.contract.profile.value in ("CODE_CHANGE", "AGENTIC_EXECUTION")
+        # [CORRIGE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : cette liste codee en dur ("CODE_CHANGE", "AGENTIC_EXECUTION")
+        # supposait que seuls ces deux profils pouvaient avoir
+        # run_declared_check dans leur plan -- mais policy.py accorde deja
+        # cet outil a SECURITY_REVIEW aussi (_profile_tools). Un run
+        # SECURITY_REVIEW dont le SEUL run_declared_check echouait reellement
+        # (passed=False) voyait son resultat jete et remplace par
+        # NOT_APPLICABLE, qui satisfait COMPLETED -- reproduit en vrai
+        # (check draft_exists avec passed=False -> run quand meme COMPLETED).
+        # Fix initial tente (deriver UNIQUEMENT du manifeste reel) cassait
+        # test_t25 : AGENTIC_EXECUTION/CODE_CHANGE doivent rester OBLIGES
+        # d'avoir un check meme si le modele n'en propose aucun (c'est
+        # exactement le bug que test_t25 empeche). Donc : la liste de
+        # profils reste l'exigence MINIMALE (toujours requise, meme sans
+        # check propose) ; AU-DESSUS, tout profil dont un run_declared_check
+        # a reellement ete execute voit aussi son resultat compte pour de
+        # vrai plutot que jete en NOT_APPLICABLE.
+        requires_declared_check = (
+            context.contract.profile.value in ("CODE_CHANGE", "AGENTIC_EXECUTION")
+            or bool(check_results)
+        )
         # [TENTÉ PUIS ANNULÉ le 19/10/2026 — VER-09 du cahier des charges
         # ("statut indéterminé si preuves insuffisantes") avait motivé
         # l'idée d'utiliser CheckStatus.UNKNOWN ici (déclaré dans

@@ -862,6 +862,28 @@ class HarnessTestCase(unittest.TestCase):
         context = self.engine.run_with_llm(contract, LlmPlanner(fake))
         self.assertNotEqual(context.state, RunState.COMPLETED)
 
+    def test_t58_security_review_completed_requires_its_declared_check_to_actually_pass(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : verify_and_complete() ne "comptait" le resultat reel de
+        # run_declared_check que pour les profils CODE_CHANGE/AGENTIC_EXECUTION
+        # codes en dur -- policy.py accorde pourtant deja cet outil a
+        # SECURITY_REVIEW aussi. Un run SECURITY_REVIEW dont le SEUL
+        # run_declared_check echouait reellement (passed=False) voyait son
+        # resultat jete et remplace par NOT_APPLICABLE, qui satisfait
+        # COMPLETED. SECURITY_REVIEW n'a aucun outil d'ecriture : draft_exists
+        # echoue toujours puisqu'aucun .md n'existe jamais dans ce workspace.
+        contract = self._agentic_contract(
+            profile=TaskProfile.SECURITY_REVIEW, max_risk=RiskLevel.R1,
+            allowed_tools=["run_declared_check"], allowed_urls=[],
+        )
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "run_declared_check", "arguments": {"check": "draft_exists"}},
+        ]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        declared = context.results[-1]["result"]
+        self.assertFalse(declared["passed"])  # le check a reellement echoue
+        self.assertNotEqual(context.state, RunState.COMPLETED)
+
     def test_t33_execute_python_handles_non_cp1252_output_without_crashing(self) -> None:
         # [AJOUTÉ 18/10/2026 — bug réel trouvé en relisant le code de cette
         # session] subprocess.run sans encoding= explicite retombe sur
