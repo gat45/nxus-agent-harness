@@ -615,10 +615,24 @@ class ToolGateway:
             # symbole mathématique (ex. ⊕) -- bug Windows réel reproduit en
             # testant `jacobian catalog`.
             import os
+            import sys
             # self.fixtures.parent est le PROJECT_ROOT du moteur (dossier du
             # run), PAS la racine du dépôt où vit .venv-jacobian/ -- résolu
             # depuis ce fichier lui-même.
-            repo_root = Path(__file__).resolve().parents[2]
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie par inspection/raisonnement (meme norme que le bug
+            # original, confirme par la logique cli.py ci-dessous) :
+            # Path(__file__) pointe vers le dossier d'extraction temporaire
+            # (_MEI...) une fois figé par PyInstaller, pas vers
+            # l'emplacement reel du checkout -- EXACTEMENT le meme piege
+            # deja corrige pour cli.py._project_root() (18/10/2026), jamais
+            # propage ici. Sous une distribution figee, repo_root pointait
+            # dans l'arbre temporaire PyInstaller, .venv-jacobian/ n'y
+            # existe jamais meme si le venv est correctement installe a
+            # cote du vrai exe -- jacobian_verify rapportait alors "binaire
+            # introuvable" a tort dans ce mode de deploiement uniquement
+            # (checkout source normal non affecte, verifie empiriquement).
+            repo_root = Path.cwd() if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
             jacobian_bin = repo_root / ".venv-jacobian" / "Scripts" / "jacobian.exe"
             if not jacobian_bin.is_file():
                 jacobian_bin = repo_root / ".venv-jacobian" / "bin" / "jacobian"

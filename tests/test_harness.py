@@ -2353,6 +2353,52 @@ class ExternalToolMissingBinaryTests(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("introuvable", result["error"])
 
+    def test_t83_jacobian_verify_uses_cwd_as_repo_root_when_frozen(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie
+        # par raisonnement (meme norme que le bug original, confirme par
+        # cli.py._project_root() qui a deja ce correctif) : Path(__file__)
+        # pointe vers le dossier d'extraction temporaire PyInstaller une
+        # fois figé, pas vers l'emplacement reel du checkout -- jamais
+        # propage a jacobian_verify, qui continuait a probe l'arbre
+        # temporaire au lieu de Path.cwd() comme cli.py le fait deja.
+        # On capture directement l'argv construit (plutot que le texte
+        # d'erreur OS, qui n'inclut pas le chemin sur Windows) en
+        # remplaçant _run_capped par un espion.
+        import sys as sys_module
+        import nxus_harness.tools as tools_module
+        fake_cwd = self.root / "frozen-cwd-marker"
+        fake_cwd.mkdir()
+        original_frozen = getattr(sys_module, "frozen", None)
+        original_cwd = Path.cwd()
+        original_run_capped = tools_module._run_capped
+        captured_args = {}
+
+        def _spy_run_capped(args, **kwargs):
+            captured_args["args"] = args
+            return {"exit_code": None, "stdout": "", "stderr": "", "timed_out": False, "error": "spy"}
+
+        sys_module.frozen = True
+        tools_module._run_capped = _spy_run_capped
+        try:
+            import os as os_module
+            os_module.chdir(fake_cwd)
+            gateway = ToolGateway(workspace=self.root / "ws-frozen", fixtures=self.root / "fixtures",
+                                  registry=ToolRegistry(), policy=PolicyEngine(),
+                                  approvals=ApprovalService(self.root / "approvals-frozen.json"),
+                                  audit=AuditLog(self.root / "audit-frozen.jsonl", run_id="r", tenant_id="t"))
+            gateway._execute(
+                "jacobian_verify", {"operation_id": "integer.compute.extended_gcd", "args_json": "{}"}, budget_seconds=5)
+        finally:
+            import os as os_module
+            os_module.chdir(original_cwd)
+            tools_module._run_capped = original_run_capped
+            if original_frozen is None:
+                del sys_module.frozen
+            else:
+                sys_module.frozen = original_frozen
+        self.assertIn(str(fake_cwd), captured_args["args"][0],
+                      "repo_root aurait du etre Path.cwd() (le repertoire 'figé' simulé), pas l'arbre du checkout")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
