@@ -776,6 +776,32 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual((context.workspace / "preuve.txt").read_text(encoding="utf-8"), "ok")
         self.assertEqual(context.results[0]["result"]["exit_code"], 0)
 
+    def test_t72_scope_violation_details_are_redacted_in_report_and_verification_json(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : le check "scope" construit ses details depuis les noms de
+        # fichiers REELLEMENT ECRITS par execute_python (argument
+        # model-controle, sans restriction de contenu sur le chemin) -- un
+        # nom de fichier choisi par le modele contenant une cle AWS
+        # atterrissait intact dans verification.json ET report.md, SANS
+        # AUCUNE redaction, contrairement au champ "details" d'audit.jsonl
+        # qui redacte deja les memes motifs.
+        contract = self._agentic_contract(allowed_paths=["preuve.txt"],
+                                          allowed_tools=["execute_python"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "execute_python",
+             "arguments": {"code": "open('leftover-AKIAIOSFODNN7EXAMPLE.txt', 'w').write('x')"}},
+        ]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        self.assertEqual(context.state, RunState.FAILED)  # violation de perimetre, a raison
+
+        verification_text = (context.run_dir / "verification.json").read_text(encoding="utf-8")
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", verification_text,
+                         "la cle AWS aurait du etre redactee dans verification.json")
+        report_text = (context.run_dir / "report.md").read_text(encoding="utf-8")
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", report_text,
+                         "la cle AWS aurait du etre redactee dans report.md")
+        self.assertIn("[REDACTED]", verification_text)
+
     def test_t25_declared_check_catches_wrong_execution_result(self) -> None:
         # [AJOUTÉ 18/10/2026 — bug réel trouvé en comparant raisonnement
         # on/off] Avant ce correctif, "declared_check" valait NOT_APPLICABLE

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 import json
@@ -10,7 +10,7 @@ import os
 from uuid import uuid4
 
 from .approvals import ApprovalService
-from .audit import AuditLog
+from .audit import AuditLog, redact
 from .evidence import EvidenceStore
 from .locking import exclusive_file_lock
 from .memory import MemoryStore
@@ -299,6 +299,23 @@ class HarnessEngine:
         secret_found = any("TOP_SECRET_" in file.read_text(encoding="utf-8", errors="ignore") for file in context.workspace.rglob("*") if file.is_file())
         results.append(VerificationResult("secret_scan", CheckStatus.FAIL if secret_found else CheckStatus.PASS,
                                           "workspace", "secret de fixture détecté" if secret_found else "aucun secret de fixture"))
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (run reel : execute_python ecrit un fichier hors perimetre
+        # nomme "AKIAIOSFODNN7EXAMPLE_leftover.txt", scope echoue a raison,
+        # mais verification.json ET report.md contenaient la cle AWS
+        # intacte dans le champ "details" de ce check) : "details"/
+        # "evidence" ne passaient par AUCUNE redaction, contrairement au
+        # champ "details" d'AuditLog.append() qui redacte deja les memes
+        # motifs. "scope" construit details depuis des noms de fichiers
+        # REELLEMENT ECRITS par execute_python/write_workspace_draft
+        # (arguments model-controles, sans restriction de contenu sur le
+        # chemin) -- un nom de fichier choisi par le modele (exfiltration
+        # via nom de fichier, ou embarquant par accident un identifiant lu
+        # via execute_python/fetch_url) atterrissait donc intact dans ces
+        # deux artefacts humains. redact() applique ici UNE FOIS, avant les
+        # deux consommateurs (verification.json ci-dessous, report.md via
+        # _render_report plus bas) plutot que duplique a chaque site.
+        results = [replace(result, details=redact(result.details), evidence=redact(result.evidence)) for result in results]
         (context.run_dir / "verification.json").write_text(json.dumps([result.to_dict() for result in results], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self._transition(context, RunState.SECURITY_GATE, "security_gate", {"checks": [item.status.value for item in results]})
         allowed_statuses = {CheckStatus.PASS, CheckStatus.NOT_APPLICABLE}
