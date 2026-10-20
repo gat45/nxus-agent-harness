@@ -2511,6 +2511,41 @@ class ExternalToolMissingBinaryTests(unittest.TestCase):
         self.assertEqual(approval_entries[0]["decision"], "deny")
         self.assertIn("inconnue", approval_entries[0]["details"]["reason"])
 
+    def test_t88_invoke_writes_a_policy_deny_entry_for_a_post_authorization_execute_failure(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, quatrieme instance de la meme classe que test_t85/86/87 :
+        # _execute() peut lever PolicyDenied APRES que policy.authorize()
+        # ait deja ecrit "allow" (ex. collision de repertoire) -- jusqu'ici
+        # rattrape UNIQUEMENT par le except Exception generique
+        # d'engine.py, qui enregistre "execution_blocked" avec
+        # decision="allow" (la transition reussit, ce n'est pas l'operation
+        # qui est marquee refusee) et AUCUN rule_id. Un filtre d'audit sur
+        # decision=="deny" ratait ce cas a 100%.
+        gateway = self._gateway()
+        (gateway.workspace / "existing_dir").mkdir(parents=True)
+        operation = PlannedOperation("op-1", "write_workspace_draft",
+                                     {"path": "existing_dir", "content": "x"}, RiskLevel.R1, "none")
+        manifest = PlanManifest(run_id="r", task_id="t", base_snapshot="x", allowed_paths=["existing_dir"],
+                               operations=[operation],
+                               created_at=utc_now(), expires_at=utc_now(), plan_hash="x")
+        contract = TaskContract(
+            task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.CODE_CHANGE, max_risk=RiskLevel.R1,
+            allowed_paths=["existing_dir"], allowed_tools=["write_workspace_draft"],
+        )
+        grant = gateway.approvals.issue(actor_id=contract.actor_id, run_id=manifest.run_id,
+                                        manifest_hash=manifest.manifest_hash, tool_id="write_workspace_draft",
+                                        arguments=operation.arguments)
+        with self.assertRaises(PolicyDenied):
+            gateway.invoke(contract=contract, manifest=manifest, state=RunState.EXECUTING,
+                           actor_id=contract.actor_id, tool_id="write_workspace_draft",
+                           arguments=operation.arguments, grant_id=grant.grant_id)
+
+        audit_lines = [json.loads(line) for line in gateway.audit.path.read_text(encoding="utf-8").splitlines() if line]
+        policy_denials = [entry for entry in audit_lines if entry["component"] == "policy" and entry["decision"] == "deny"]
+        self.assertEqual(len(policy_denials), 1, f"attendu 1 entree policy/deny : {policy_denials}")
+        self.assertEqual(policy_denials[0]["details"]["rule"], "P-EXEC-001")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

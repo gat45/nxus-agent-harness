@@ -325,7 +325,24 @@ class ToolGateway:
                 self.audit.append("approval", "consume", "deny", {"grant_id": grant_id, "tool_id": tool_id, "reason": str(exc)})
                 raise
             self.audit.append("approval", "consume", "allow", {"grant_id": grant_id, "tool_id": tool_id})
-        result = self._execute(tool_id, arguments, budget_seconds=contract.budget_seconds, prior_results=prior_results)
+        try:
+            result = self._execute(tool_id, arguments, budget_seconds=contract.budget_seconds, prior_results=prior_results)
+        except PolicyDenied as exc:
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai, meme classe que les trois correctifs
+            # precedents (5b5c9ae, 5c08a57, f1c3cdf) : _execute() peut
+            # lever PolicyDenied APRES que policy.authorize() ait deja
+            # ecrit "allow" (collision de repertoire, chemin hors
+            # workspace, fixture hors repertoire...) -- jusqu'ici
+            # rattrape UNIQUEMENT par le except Exception generique
+            # d'engine.py, qui enregistre "execution_blocked" avec
+            # decision="allow" (la transition d'etat elle-meme a reussi)
+            # et AUCUN rule_id/owasp_llm_risk -- un filtre d'audit sur
+            # decision=="deny" rate ce cas a 100%, et pire, l'entree qui
+            # signale le blocage affiche elle-meme decision="allow", ce
+            # qui est activement trompeur pour un filtre automatise.
+            self.audit.append("policy", tool_id, "deny", {"rule": "P-EXEC-001", "reason": str(exc), "owasp_llm_risk": None})
+            raise
         self.audit.append("gateway", tool_id, "executed", {"result_hash": content_hash(result), "tool_version": tool.version})
         return result
 
