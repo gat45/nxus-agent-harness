@@ -8,6 +8,33 @@ import json
 from .models import Claim, Evidence, ValidationError, flatten_for_markdown
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : evidence_ids()/_trusted_evidence_ids()/validate_claims()/
+    render_citations() faisaient chacun json.loads(line) sans AUCUN
+    try/except -- une seule ligne corrompue (ecriture tronquee par un
+    crash, disque plein, ecrivain concurrent) dans evidence.jsonl OU
+    claims.jsonl plantait les QUATRE methodes avec un JSONDecodeError non
+    rattrape. validate_claims() est appelee depuis verify_and_complete()
+    (engine.py) : une seule ligne corrompue pouvait donc faire echouer un
+    run par ailleurs reussi, juste avant la ligne d'arrivee. Meme classe
+    de bug et meme remede (echec OUVERT, ligne ignoree plutot que tout
+    faire planter) que le correctif de memory.py.recall() (74e701d) --
+    centralise ici pour que les quatre methodes partagent EXACTEMENT la
+    meme tolerance plutot que de la dupliquer quatre fois."""
+    if not path.exists():
+        return []
+    entries = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
 class EvidenceStore:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -24,15 +51,10 @@ class EvidenceStore:
             handle.write(json.dumps(claim.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
 
     def evidence_ids(self) -> set[str]:
-        if not self.evidence_path.exists():
-            return set()
-        return {json.loads(line)["evidence_id"] for line in self.evidence_path.read_text(encoding="utf-8").splitlines() if line}
+        return {entry["evidence_id"] for entry in _read_jsonl(self.evidence_path)}
 
     def _trusted_evidence_ids(self) -> set[str]:
-        if not self.evidence_path.exists():
-            return set()
-        return {json.loads(line)["evidence_id"] for line in self.evidence_path.read_text(encoding="utf-8").splitlines()
-                if line and not json.loads(line).get("untrusted", False)}
+        return {entry["evidence_id"] for entry in _read_jsonl(self.evidence_path) if not entry.get("untrusted", False)}
 
     def validate_claims(self) -> list[str]:
         known = self.evidence_ids()
@@ -46,12 +68,7 @@ class EvidenceStore:
         # critique -- la simple presence d'evidence_ids ne suffit plus.
         trusted = self._trusted_evidence_ids()
         errors: list[str] = []
-        if not self.claims_path.exists():
-            return errors
-        for line in self.claims_path.read_text(encoding="utf-8").splitlines():
-            if not line:
-                continue
-            item = json.loads(line)
+        for item in _read_jsonl(self.claims_path):
             evidence_ids = set(item.get("evidence_ids", []))
             missing = evidence_ids - known
             if item.get("critical") and (missing or not evidence_ids):
@@ -66,9 +83,7 @@ class EvidenceStore:
             raise ValidationError("; ".join(errors))
 
     def render_citations(self) -> str:
-        if not self.evidence_path.exists():
-            return ""
-        entries = [json.loads(line) for line in self.evidence_path.read_text(encoding="utf-8").splitlines() if line]
+        entries = _read_jsonl(self.evidence_path)
         # [AJOUTE 20/10/2026 -- meme classe de faille deja corrigee pour
         # PLAN.md/report.md (voir engine.py._render_report, 20/10/2026) :
         # title/url/locator proviennent de Evidence.create(), lui-meme

@@ -409,6 +409,27 @@ class HarnessTestCase(unittest.TestCase):
         store.add_claim(Claim("claim-1", "affirmation critique", True, [trusted.evidence_id], "pending"))
         store.require_valid_claims()  # ne doit pas lever
 
+    def test_t79_evidence_methods_survive_one_corrupted_jsonl_line(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : evidence_ids()/_trusted_evidence_ids()/validate_claims()/
+        # render_citations() faisaient chacun json.loads(line) sans AUCUN
+        # try/except -- une seule ligne corrompue (ecriture tronquee par
+        # un crash, disque plein) dans evidence.jsonl plantait les QUATRE
+        # methodes avec un JSONDecodeError non rattrape. validate_claims()
+        # est appelee depuis verify_and_complete() : une seule ligne
+        # corrompue pouvait donc faire echouer un run par ailleurs reussi.
+        store = EvidenceStore(self.root / "evidence-corrupt")
+        good = Evidence.create(title="Preuve valide", url="local://ok", locator="ok", excerpt="ok")
+        store.add_evidence(good)
+        store.add_claim(Claim("claim-1", "affirmation", True, [good.evidence_id], "pending"))
+        with store.evidence_path.open("a", encoding="utf-8") as handle:
+            handle.write('{not valid json at all\n')
+
+        self.assertEqual(store.evidence_ids(), {good.evidence_id})
+        self.assertEqual(store._trusted_evidence_ids(), {good.evidence_id})
+        self.assertEqual(store.validate_claims(), [])
+        self.assertIn("Preuve valide", store.render_citations())
+
     def test_t11_audit_redacts_fixture_secret(self) -> None:
         path = self.root / "audit.jsonl"
         audit = AuditLog(path, run_id="r", tenant_id="t")
