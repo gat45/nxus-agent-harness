@@ -576,6 +576,54 @@ class HarnessTestCase(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 self.engine.resume_run(hostile_tenant, hostile_run)
 
+    def test_t74_resume_run_raises_clean_error_on_corrupted_state_json(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : resume_run() n'avait AUCUN try/except autour de la lecture
+        # de state.json -- un JSON invalide, une cle "state" absente, ou
+        # une valeur inconnue de RunState (crash mi-ecriture, edition
+        # manuelle, copie tronquee) remontait une JSONDecodeError/KeyError/
+        # ValueError BRUTE a l'appelant au lieu d'un ValidationError propre.
+        context = self.engine.create_run(self.contract())
+        self.engine.plan(context)
+        tenant_id, run_id = context.contract.tenant_id, context.run_id
+
+        state_path = context.run_dir / "state.json"
+        state_path.write_text("{not valid json", encoding="utf-8")
+        with self.assertRaises(ValidationError):
+            self.engine.resume_run(tenant_id, run_id)
+
+        state_path.write_text(json.dumps({"no_state_key": True}), encoding="utf-8")
+        with self.assertRaises(ValidationError):
+            self.engine.resume_run(tenant_id, run_id)
+
+        state_path.write_text(json.dumps({"state": "NOT_A_REAL_STATE"}), encoding="utf-8")
+        with self.assertRaises(ValidationError):
+            self.engine.resume_run(tenant_id, run_id)
+
+    def test_t74_approve_validates_every_tool_id_before_issuing_any_grant(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (plan.manifest.json edite a la main pour que la 2e operation
+        # reference un tool_id inexistant) : approve() emettait et
+        # PERSISTAIT deja un grant reel pour la 1ere operation avant
+        # d'atteindre la 2e et de lever PolicyDenied -- jamais rattrape,
+        # donc le run restait AWAITING_APPROVAL avec un grant deja vivant
+        # sur disque dont aucun appelant n'a connaissance.
+        context = self.engine.create_run(self.contract())
+        self.engine.plan(context)
+        manifest_path = context.run_dir / "plan.manifest.json"
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_data["operations"][-1]["tool_id"] = "no_such_tool_v2"
+        manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+        resumed = self.engine.resume_run(context.contract.tenant_id, context.run_id)
+        with self.assertRaises(PolicyDenied):
+            self.engine.approve(resumed, actor_id=resumed.contract.actor_id)
+
+        approvals_path = context.run_dir / "approvals.json"
+        if approvals_path.is_file():
+            approvals_data = json.loads(approvals_path.read_text(encoding="utf-8"))
+            self.assertEqual(approvals_data, [], "aucun grant ne devrait avoir ete emis avant la validation complete")
+
     def test_t19_memory_is_isolated_per_tenant(self) -> None:
         self.engine.run_demo(self.contract(tenant="tenant-x"))
         self.assertEqual(len(self.engine.memory.recall("tenant-x")), 1)

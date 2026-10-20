@@ -129,10 +129,23 @@ class HarnessEngine:
         run_dir = self.runs_root / tenant_id / run_id
         if not run_dir.is_dir():
             raise ValidationError(f"run introuvable : {tenant_id}/{run_id}")
-        contract = TaskContract.from_dict(json.loads((run_dir / "task.json").read_text(encoding="utf-8")))
-        state = RunState(json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["state"])
-        manifest_path = run_dir / "plan.manifest.json"
-        manifest = PlanManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8"))) if manifest_path.is_file() else None
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (state.json corrompu reel sur disque) : aucun try/except
+        # n'entourait ces lectures -- un JSON invalide, une cle "state"
+        # absente, ou une valeur de state inconnue de l'enum RunState
+        # (crash mi-ecriture avant le correctif atomique de
+        # _persist_state(), edition manuelle par un operateur, copie
+        # tronquee) remontait une JSONDecodeError/KeyError/ValueError BRUTE
+        # a l'appelant (cli.py `approve`, la route web /mission) au lieu
+        # d'un ValidationError propre, contrairement au garde-fou deja en
+        # place juste au-dessus pour tenant_id/run_id.
+        try:
+            contract = TaskContract.from_dict(json.loads((run_dir / "task.json").read_text(encoding="utf-8")))
+            state = RunState(json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["state"])
+            manifest_path = run_dir / "plan.manifest.json"
+            manifest = PlanManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8"))) if manifest_path.is_file() else None
+        except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+            raise ValidationError(f"état corrompu pour {tenant_id}/{run_id} : {exc}") from exc
         audit = AuditLog(run_dir / "audit.jsonl", run_id=run_id, tenant_id=tenant_id)
         return RunContext(run_id, contract, run_dir, run_dir / "workspace", state, audit,
                           ApprovalService(run_dir / "approvals.json"), EvidenceStore(run_dir), PolicyEngine(), manifest, [])
@@ -179,6 +192,21 @@ class HarnessEngine:
                 raise ValidationError("approbateur ou manifeste invalide")
             grant_ids: list[str] = []
             registry = ToolRegistry()
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie
+            # en vrai (plan.manifest.json edite a la main pour reference un
+            # tool_id inexistant sur la DEUXIEME operation) : cette boucle
+            # emettait et PERSISTAIT deja un grant reel pour la PREMIERE
+            # operation avant d'atteindre la seconde et de lever
+            # PolicyDenied -- jamais rattrape ici, donc _transition() vers
+            # APPROVED n'etait jamais atteinte, et le run restait
+            # AWAITING_APPROVAL avec un grant deja vivant sur disque dont
+            # aucun appelant n'a connaissance. Si l'operateur corrige puis
+            # rappelle approve(), la boucle re-emet un SECOND grant pour la
+            # meme operation -- deux grants vivants pour une seule
+            # operation, incoherence d'audit. Valider TOUS les tool_id
+            # AVANT d'emettre le moindre grant evite tout etat partiel.
+            for operation in context.manifest.operations:
+                registry.get(operation.tool_id)
             for operation in context.manifest.operations:
                 definition = registry.get(operation.tool_id)
                 if definition.requires_approval:
