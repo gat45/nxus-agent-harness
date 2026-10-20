@@ -68,12 +68,27 @@ def _strip_markdown_code_fence(content: str) -> str:
     dès le premier caractère). Ne modifie pas une chaîne qui est déjà du
     JSON brut.
     """
+    # [CORRIGE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    # vrai : exigeait que la fermeture ``` soit le TOUT DERNIER token de la
+    # chaine entiere (rstrip().endswith("```")) -- un modele qui ajoute du
+    # texte APRES le bloc ferme (commentaire, note, exemple de formatage
+    # contenant lui-meme des backticks) faisait echouer ce test, donc RIEN
+    # n'etait retire, et json.loads() sur la chaine encore fermee par ```
+    # echouait -- alors que le JSON etait parfaitement valide et extractible.
+    # Chercher la fermeture ``` par position (premiere ou derniere) est
+    # ambigu dans les deux sens : des backticks triples peuvent apparaitre
+    # a la fois DANS une valeur de chaine JSON (avant la vraie fermeture)
+    # ET dans de la prose APRES elle. Le parseur JSON lui-meme sait
+    # exactement ou s'arrete une valeur JSON valide (raw_decode ignore tout
+    # ce qui suit) -- plus robuste que toute heuristique sur la position
+    # des ```, et marche identiquement pour les deux cas.
     stripped = content.strip()
-    if stripped.startswith("```"):
-        without_leading_fence = stripped.split("\n", 1)[1] if "\n" in stripped else ""
-        if without_leading_fence.rstrip().endswith("```"):
-            return without_leading_fence.rsplit("```", 1)[0]
-    return stripped
+    without_leading_fence = stripped.split("\n", 1)[1] if stripped.startswith("```") and "\n" in stripped else stripped
+    try:
+        _, end = json.JSONDecoder().raw_decode(without_leading_fence)
+        return without_leading_fence[:end]
+    except json.JSONDecodeError:
+        return without_leading_fence
 
 
 @dataclass(frozen=True)

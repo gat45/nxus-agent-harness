@@ -2060,5 +2060,35 @@ class LlmPlannerRetryBudgetTests(unittest.TestCase):
         self.assertEqual(adapter.calls, 1, "la relance n'aurait pas du avoir lieu, le budget etait deja epuise")
 
 
+class StripMarkdownCodeFenceTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : _strip_markdown_code_fence() exigeait que la fermeture ``` soit
+    le TOUT DERNIER token de la chaine entiere -- un modele qui ajoute du
+    texte APRES le bloc ferme (commentaire, note contenant elle-meme des
+    backticks) faisait echouer ce test, donc RIEN n'etait retire, et
+    json.loads() sur la chaine encore fermee echouait alors que le JSON
+    etait parfaitement valide et extractible."""
+
+    def test_t75_trailing_prose_after_closing_fence_does_not_break_extraction(self) -> None:
+        from nxus_harness.llama_cpp_adapter import _strip_markdown_code_fence
+        content = (
+            "```json\n{\"operations\": []}\n```\n"
+            "Note : voir le guide de style pour ```le formatage```."
+        )
+        extracted = _strip_markdown_code_fence(content)
+        self.assertEqual(json.loads(extracted), {"operations": []})
+
+    def test_t75_embedded_backticks_inside_json_string_before_true_closing_fence(self) -> None:
+        from nxus_harness.llama_cpp_adapter import _strip_markdown_code_fence
+        content = "```json\n{\"notes\": \"voir ```python\\nx=1\\n``` pour un exemple\"}\n```"
+        extracted = _strip_markdown_code_fence(content)
+        self.assertEqual(json.loads(extracted)["notes"], "voir ```python\nx=1\n``` pour un exemple")
+
+    def test_t75_already_raw_json_without_fence_is_unaffected(self) -> None:
+        from nxus_harness.llama_cpp_adapter import _strip_markdown_code_fence
+        content = '{"operations": []}'
+        self.assertEqual(_strip_markdown_code_fence(content), content)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
