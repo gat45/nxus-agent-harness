@@ -220,6 +220,20 @@ class LlmPlanner:
                     ast.parse(code)
                 except SyntaxError as exc:
                     errors.append(f"code execute_python invalide (SyntaxError: {exc.msg} ligne {exc.lineno}): {code!r}")
+                except (RecursionError, ValueError, MemoryError) as exc:
+                    # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+                    # verifie en vrai : ast.parse() sur une expression plate
+                    # mais pathologiquement profonde (ex. "1+"*200000 + "1",
+                    # sans parentheses) leve RecursionError, pas SyntaxError
+                    # -- CPython a un controle de profondeur explicite pour
+                    # les parentheses imbriquees (qui leve bien SyntaxError)
+                    # mais pas pour une chaine binaire plate. Cette
+                    # exception remontait brute hors de _syntax_errors(),
+                    # plantant toute la mission au lieu de declencher le
+                    # cycle de relance-avec-correction que cette methode
+                    # existe pour fournir. exc.lineno/exc.msg n'existent pas
+                    # sur ces types -- str(exc) seul.
+                    errors.append(f"code execute_python invalide ({type(exc).__name__}: {exc})")
         return errors
 
     def _propose_operations(self, contract: TaskContract, *, max_retries: int = 0,
@@ -312,7 +326,18 @@ class LlmPlanner:
                 # (voir plus bas) : donne l'erreur RÉELLE au modèle plutôt
                 # que de le laisser deviner pourquoi sa précédente
                 # proposition a été rejetée.
-                + (f"\n\nTa proposition precedente a ete rejetee : {correction}\n"
+                # [MIS A JOUR 20/10/2026 -- bug reel trouve par un agent
+                # puis verifie en vrai : `correction` est construit depuis
+                # le CODE LITTERAL propose par le modele (voir
+                # _syntax_errors(), {code!r}) et reinjecte ici TEL QUEL dans
+                # le prochain message user -- jamais passe par
+                # _sanitize_memory_text(), qui existe deja pour neutraliser
+                # exactement cette classe d'attaque (sequences de template
+                # de chat type "<|im_start|>system...") sur le chemin
+                # memoire. Un code invalide contenant de telles sequences
+                # revenait donc intact dans son propre prochain tour de
+                # prompt. Meme fonction reutilisee, pas dupliquee.
+                + (f"\n\nTa proposition precedente a ete rejetee : {self._sanitize_memory_text(correction)}\n"
                    "Corrige exactement ce probleme dans ta nouvelle proposition." if correction else "")
             )},
         ]
