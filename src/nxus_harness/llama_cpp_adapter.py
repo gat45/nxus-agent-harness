@@ -171,10 +171,20 @@ class LlamaCppAdapter:
         GET /v1/models seul ne reporte QUE n_ctx_train (contexte natif max du
         modèle), jamais le --ctx-size réellement configuré au lancement du
         serveur (vérifié : n_ctx y est toujours null). Ce dernier n'existe
-        que dans GET /props ("default_generation_settings.params.n_ctx"),
-        propre au serveur entier (pas par modèle en mode routeur multi-
-        modèles) — on le fusionne donc comme n_ctx_configured au niveau
-        serveur plutôt que de prétendre qu'il est par-modèle.
+        que dans GET /props ("default_generation_settings.n_ctx" --
+        [CORRIGE 20/10/2026 -- bug de doc trouve par un agent puis verifie
+        contre les types TypeScript reels de la webui llama.cpp : n_ctx est
+        un FRERE de "params" dans default_generation_settings, jamais
+        imbrique sous "default_generation_settings.params.n_ctx" comme
+        l'affirmait cette docstring avant correction -- "params" ne
+        contient que les reglages d'echantillonnage (temp, top_p...),
+        jamais n_ctx. Le CODE ci-dessous lisait deja le bon chemin ; seule
+        la docstring etait fausse -- un piege pour un futur mainteneur qui
+        l'aurait "corrigee" en suivant la doc plutot que le vrai serveur,
+        regression que rien n'aurait detectee sans test dedie (voir
+        test_t77)], propre au serveur entier (pas par modèle en mode
+        routeur multi-modèles) — on le fusionne donc comme n_ctx_configured
+        au niveau serveur plutôt que de prétendre qu'il est par-modèle.
         """
         models_raw = self._get_json("/v1/models")
         models = models_raw.get("data") or models_raw.get("models") or []

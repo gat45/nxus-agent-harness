@@ -2141,5 +2141,58 @@ class SyntaxErrorsRetryCorrectionTests(unittest.TestCase):
         self.assertIn("neutralisee", retry_user_message)
 
 
+class ModelStatusPropsShapeTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug de documentation trouve par un agent puis
+    verifie contre les types TypeScript reels de la webui llama.cpp :
+    model_status() lisait deja correctement
+    default_generation_settings.n_ctx (un FRERE de "params", jamais
+    imbrique sous "params"), mais sa docstring affirmait le mauvais
+    chemin ("...params.n_ctx") -- un piege pour un futur mainteneur qui
+    aurait "corrige" le code pour suivre la doc fausse, regression que
+    rien n'aurait detectee : aucun test ne couvrait /v1/models ou /props
+    avant ce test."""
+
+    def setUp(self) -> None:
+        import http.server
+        import threading as _threading
+
+        models_body = json.dumps({
+            "data": [{"id": "q38_9b_s3_gutop.gguf", "meta": {"n_ctx_train": 32768, "n_params": 9_000_000_000, "size": 5_000_000_000}}],
+        }).encode("utf-8")
+        props_body = json.dumps({
+            "default_generation_settings": {"id": 0, "n_ctx": 8192, "params": {"temp": 0.8, "top_k": 40}},
+            "total_slots": 1,
+        }).encode("utf-8")
+
+        class _ModelsAndPropsHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                body = models_body if self.path == "/v1/models" else props_body
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), _ModelsAndPropsHandler)
+        self.port = self.server.server_address[1]
+        self.thread = _threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+
+    def test_t77_model_status_reads_n_ctx_as_sibling_of_params_not_nested_under_it(self) -> None:
+        from nxus_harness.llama_cpp_adapter import LlamaCppAdapter, LlamaCppProfile
+
+        adapter = LlamaCppAdapter(LlamaCppProfile(base_url=f"http://127.0.0.1:{self.port}", model="m"))
+        status = adapter.model_status()
+        self.assertEqual(status["n_ctx_configured"], 8192)
+        self.assertEqual(status["total_slots"], 1)
+        self.assertEqual(status["models"][0]["n_ctx_train"], 32768)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
