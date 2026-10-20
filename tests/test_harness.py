@@ -2307,5 +2307,52 @@ class ModelStatusPropsShapeTests(unittest.TestCase):
         self.assertEqual(status["models"][0]["n_ctx_train"], 32768)
 
 
+class ExternalToolMissingBinaryTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : avec shell=True (branche Windows de rea_inspect/smokinggun_scan),
+    un binaire absent ne leve JAMAIS FileNotFoundError -- cmd.exe lui-meme
+    existe toujours, Popen reussit, puis cmd.exe ecrit son propre message
+    d'erreur localise sur stderr et sort avec exit_code=1, indiscernable
+    d'un VRAI echec de l'outil. jacobian_verify (Popen direct, sans shell)
+    produisait deja une erreur propre pour ce meme cas -- rea_inspect/
+    smokinggun_scan ne l'avaient pas."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="nxus-missingbin-"))
+        (self.root / "fixtures").mkdir()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _gateway(self) -> ToolGateway:
+        return ToolGateway(workspace=self.root / "ws", fixtures=self.root / "fixtures",
+                           registry=ToolRegistry(), policy=PolicyEngine(),
+                           approvals=ApprovalService(self.root / "approvals.json"),
+                           audit=AuditLog(self.root / "audit.jsonl", run_id="r", tenant_id="t"))
+
+    def test_t82_rea_inspect_reports_clean_error_when_binary_missing(self) -> None:
+        import shutil as shutil_module
+        original_which = shutil_module.which
+        shutil_module.which = lambda name: None if name == "rea" else original_which(name)
+        try:
+            result = self._gateway()._execute(
+                "rea_inspect", {"subcommand": "analyze", "target": "fake.apk"}, budget_seconds=5)
+        finally:
+            shutil_module.which = original_which
+        self.assertIn("error", result)
+        self.assertIn("introuvable", result["error"])
+
+    def test_t82_smokinggun_scan_reports_clean_error_when_binary_missing(self) -> None:
+        import shutil as shutil_module
+        original_which = shutil_module.which
+        shutil_module.which = lambda name: None if name == "smokinggun" else original_which(name)
+        try:
+            result = self._gateway()._execute("smokinggun_scan", {"target": "src"}, budget_seconds=5)
+        finally:
+            shutil_module.which = original_which
+        self.assertIn("error", result)
+        self.assertIn("introuvable", result["error"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

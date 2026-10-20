@@ -561,7 +561,22 @@ class ToolGateway:
             # execute_python : le grant est lié au (sous-commande, cible)
             # EXACT proposé, jamais à "autoriser rea" en général.
             import os
+            import shutil
             timeout = max(1, min(budget_seconds, 60))
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai : avec shell=True (branche Windows), un
+            # binaire absent ne leve JAMAIS FileNotFoundError -- cmd.exe
+            # lui-meme existe toujours, Popen reussit, puis cmd.exe ecrit
+            # son propre message d'erreur localise sur stderr et sort avec
+            # exit_code=1. Resultat indiscernable d'un VRAI echec de
+            # l'outil (rea tourne mais l'analyse trouve un probleme) --
+            # aucune cle "error" distincte, contrairement a jacobian_verify
+            # (Popen direct, sans shell) qui produit deja une erreur propre
+            # sur ce meme cas. Verifie explicitement AVANT shell=True pour
+            # produire le meme type d'erreur structuree que jacobian_verify.
+            if os.name == "nt" and shutil.which("rea") is None:
+                return {"subcommand": arguments["subcommand"], "target": arguments["target"],
+                       "untrusted": True, "error": "binaire 'rea' introuvable sur PATH"}
             # [CORRIGÉ 18/10/2026] sur Windows, `rea` est un wrapper npm
             # (rea.CMD) -- shell=True requis pour le résoudre. subcommand
             # vient d'une allowlist fixe (aucun métacaractère possible) et
@@ -580,7 +595,12 @@ class ToolGateway:
             # vérifiée. shell=True sur Windows pour la même raison que
             # rea_inspect (wrapper npm .CMD).
             import os
+            import shutil
             timeout = max(1, min(budget_seconds, 60))
+            # [AJOUTE 20/10/2026 -- meme faille que rea_inspect ci-dessus]
+            if os.name == "nt" and shutil.which("smokinggun") is None:
+                return {"target": arguments["target"], "untrusted": True,
+                       "error": "binaire 'smokinggun' introuvable sur PATH"}
             result = _run_capped(["smokinggun", "scan", arguments["target"], "--format", "sarif"],
                                  cwd=self.workspace, timeout=timeout, shell=(os.name == "nt"),
                                  max_stdout=8000, max_stderr=2000, cancel_event=self.policy.cancel_event)
