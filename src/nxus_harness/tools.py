@@ -19,6 +19,25 @@ from .models import Evidence, PlanManifest, PolicyDenied, RiskLevel, RunState, T
 from .policy import PolicyEngine
 
 
+def _read_text_or_none(path: Path) -> str | None:
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : file_equals/stdout_matches_file faisaient
+    target.read_text(encoding="utf-8").strip() si target.is_file() --
+    mais un fichier qui EST bien un fichier peut quand meme contenir des
+    octets non-UTF-8 (ex. donnees binaires ecrites par un execute_python
+    precedent au meme chemin). target.read_text() levait alors un
+    UnicodeDecodeError BRUT non rattrape, faisant planter le run entier
+    au lieu de faire simplement echouer le check (comme les autres
+    conditions prevues -- execute_python precedent absent/en echec/sans
+    sortie -- sont deja gerees proprement quelques lignes plus bas)."""
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+
+
 def _kill_tree(proc: subprocess.Popen) -> None:
     """[AJOUTÉ 19/10/2026 — REC-06 du cahier des charges, reproduit en vrai]
     proc.kill() ne termine QUE le process direct -- avec shell=True (rea_inspect/
@@ -333,7 +352,15 @@ class ToolGateway:
         if tool_id == "run_declared_check":
             check = arguments["check"]
             if check == "draft_exists":
-                found = any(self.workspace.rglob("*.md"))
+                # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+                # verifie en vrai : rglob("*.md") filtre par NOM seulement,
+                # sans is_file() -- un REPERTOIRE nomme "foo.md" (vide,
+                # aucun vrai brouillon dedans) satisfaisait ce check et
+                # marquait le run COMPLETED. Meme classe de faux-positif
+                # que celle deja corrigee pour file_equals (18/10/2026 :
+                # le modele inventant sa propre valeur attendue), ici via
+                # un nom de repertoire plutot qu'une valeur mensongere.
+                found = any(path.is_file() for path in self.workspace.rglob("*.md"))
                 return {"check": check, "exit_code": 0 if found else 1, "passed": found}
             # [AJOUTÉ 18/10/2026 — trouvé en comparant raisonnement on/off]
             # "draft_exists" était le SEUL vérificateur possible : aucun moyen
@@ -348,7 +375,7 @@ class ToolGateway:
                 _, _, rest = check.partition(":")
                 relative_path, _, expected = rest.partition(":")
                 target = self._resolve_workspace_path(relative_path)
-                actual = target.read_text(encoding="utf-8").strip() if target.is_file() else None
+                actual = _read_text_or_none(target)
                 passed = actual == expected
                 return {"check": check, "exit_code": 0 if passed else 1, "passed": passed,
                        "actual": actual}
@@ -367,7 +394,7 @@ class ToolGateway:
                 # inventer, rien à mentir sur.
                 _, _, relative_path = check.partition(":")
                 target = self._resolve_workspace_path(relative_path)
-                actual = target.read_text(encoding="utf-8").strip() if target.is_file() else None
+                actual = _read_text_or_none(target)
                 prior_entry = None
                 for entry in reversed(prior_results or []):
                     if entry["tool_id"] == "execute_python":

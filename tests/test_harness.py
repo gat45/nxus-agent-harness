@@ -908,6 +908,35 @@ class HarnessTestCase(unittest.TestCase):
         third = gateway._execute("write_workspace_draft", {"path": "a.md", "content": "different"}, budget_seconds=5)
         self.assertTrue(third["changed"])
 
+    def test_t81_draft_exists_rejects_a_directory_named_like_a_markdown_file(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : rglob("*.md") filtre par NOM seulement, sans is_file() --
+        # un REPERTOIRE nomme "foo.md" (vide, aucun vrai brouillon dedans)
+        # satisfaisait ce check et marquait le run COMPLETED.
+        gateway = ToolGateway(workspace=self.root / "ws-draftdir", fixtures=self.root / "fixtures",
+                              registry=ToolRegistry(), policy=PolicyEngine(),
+                              approvals=ApprovalService(self.root / "approvals-draftdir.json"),
+                              audit=AuditLog(self.root / "audit-draftdir.jsonl", run_id="r", tenant_id="t"))
+        (gateway.workspace / "foo.md").mkdir(parents=True)
+        result = gateway._execute("run_declared_check", {"check": "draft_exists"}, budget_seconds=5)
+        self.assertFalse(result["passed"], "un repertoire nomme *.md ne doit jamais satisfaire draft_exists")
+
+    def test_t81_file_equals_rejects_non_utf8_content_cleanly(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : target.read_text(encoding="utf-8") levait un
+        # UnicodeDecodeError BRUT non rattrape sur un fichier existant
+        # contenant des octets non-UTF-8 (ex. donnees binaires ecrites par
+        # un execute_python precedent), faisant planter le run entier au
+        # lieu de simplement faire echouer le check.
+        gateway = ToolGateway(workspace=self.root / "ws-binary", fixtures=self.root / "fixtures",
+                              registry=ToolRegistry(), policy=PolicyEngine(),
+                              approvals=ApprovalService(self.root / "approvals-binary.json"),
+                              audit=AuditLog(self.root / "audit-binary.jsonl", run_id="r", tenant_id="t"))
+        (gateway.workspace / "bin.dat").write_bytes(b"\xff\xfe\x00\x01")
+        result = gateway._execute("run_declared_check", {"check": "file_equals:bin.dat:peu importe"}, budget_seconds=5)
+        self.assertFalse(result["passed"])
+        self.assertIsNone(result["actual"])
+
     def test_t72_scope_violation_details_are_redacted_in_report_and_verification_json(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai : le check "scope" construit ses details depuis les noms de
