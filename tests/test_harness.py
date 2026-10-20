@@ -1430,6 +1430,68 @@ class HarnessTestCase(unittest.TestCase):
         finally:
             policy_module.socket.getaddrinfo = original_getaddrinfo
 
+    def test_t73_fetch_url_fails_closed_when_revalidation_dns_lookup_errors_then_resolves_private(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (serveur HTTP reel sur 127.0.0.1, getaddrinfo truque) :
+        # resolve_public_ips() renvoie un set() vide aussi bien pour "cet
+        # hote ne resout nulle part" (sans risque) QUE pour "la revalidation
+        # vient d'echouer (gaierror/SERVFAIL) mais pourrait resoudre
+        # differemment juste apres" (DNS rebinding). L'ancien code ne
+        # posait AUCUNE garde quand pinned_ips etait vide, laissant
+        # opener.open() refaire sa PROPRE resolution sans AUCUNE pin --
+        # exactement la race que l'epinglage existe pour fermer. Simule la
+        # sequence exacte : 1er appel getaddrinfo (la revalidation dans
+        # _execute()) leve gaierror, puis le 2e appel (la vraie connexion)
+        # resout vers 127.0.0.1 (le serveur de test).
+        import socket
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import nxus_harness.policy as policy_module
+
+        class _SecretHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = b"SECRET_INTERNAL_PAYLOAD"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _SecretHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        original_getaddrinfo = policy_module.socket.getaddrinfo
+        calls = {"n": 0}
+
+        def flaky_then_rebind(host, *args, **kwargs):
+            if host == "victim.example.invalid":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise socket.gaierror("résolution DNS temporairement indisponible (simulée)")
+                return [(2, 1, 6, "", ("127.0.0.1", port))]
+            return original_getaddrinfo(host, *args, **kwargs)
+
+        policy_module.socket.getaddrinfo = flaky_then_rebind
+        try:
+            gateway = ToolGateway(workspace=self.root / "ws4", fixtures=self.root / "fixtures",
+                                  registry=ToolRegistry(), policy=PolicyEngine(),
+                                  approvals=ApprovalService(self.root / "approvals4.json"),
+                                  audit=AuditLog(self.root / "audit4.jsonl", run_id="r", tenant_id="t"))
+            result = gateway._execute("fetch_url", {"url": f"http://victim.example.invalid:{port}/"}, budget_seconds=5)
+        finally:
+            policy_module.socket.getaddrinfo = original_getaddrinfo
+            server.shutdown()
+
+        # Avant le correctif : result contenait "content": "SECRET_INTERNAL_PAYLOAD"
+        # (la connexion non gardee reussissait reellement).
+        self.assertNotEqual(result.get("content"), "SECRET_INTERNAL_PAYLOAD",
+                            "la connexion n'aurait jamais du reussir sans epinglage valide")
+        self.assertIn("error", result)
+
     def test_t24_fetch_url_does_not_follow_redirect_to_private_host(self) -> None:
         # [AJOUTÉ 18/10/2026] Trouvé en documentant la checklist R2+ :
         # urlopen() suit les redirections par défaut. Un serveur local
@@ -1460,9 +1522,19 @@ class HarnessTestCase(unittest.TestCase):
         # en usage réel, mais qui empêcherait ce test d'isoler ce qu'il
         # vérifie. On neutralise UNIQUEMENT la validation (pas le pinning),
         # pour ce test, en simulant "déjà autorisé par ailleurs".
+        # [MIS A JOUR 20/10/2026 -- faille reelle trouvee ET REPRODUITE par
+        # un agent : un set() vide signifiait auparavant "pas d'epinglage
+        # necessaire", laissant _execute() connecter SANS AUCUNE garde
+        # quand la revalidation echouait -- exactement la race que
+        # l'epinglage existe pour fermer. _execute() est desormais
+        # fail-closed : un set() vide est maintenant refuse a la connexion
+        # plutot qu'accepte silencieusement. Ce test simule donc un hote
+        # DEJA EPINGLE sur 127.0.0.1 (la vraie IP du serveur de test) au
+        # lieu d'un set() vide, pour continuer a isoler la defense
+        # anti-redirection sans se heurter au nouveau fail-closed.
         import nxus_harness.policy as policy_module
         original_resolve = policy_module.resolve_public_ips
-        policy_module.resolve_public_ips = lambda host: set()
+        policy_module.resolve_public_ips = lambda host: {"127.0.0.1"}
         try:
             gateway = ToolGateway(workspace=self.root / "ws2", fixtures=self.root / "fixtures",
                                   registry=ToolRegistry(), policy=PolicyEngine(),

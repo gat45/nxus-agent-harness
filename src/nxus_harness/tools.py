@@ -456,12 +456,30 @@ class ToolGateway:
             except ValidationError as exc:
                 return {"url": arguments["url"], "error": f"garde SSRF (DNS rebinding) : {exc}", "untrusted": True}
             original_getaddrinfo = socket_module.getaddrinfo
-            if pinned_ips:
-                def _pinned_getaddrinfo(requested_host, *args, **kwargs):
-                    if requested_host == host:
-                        return [info for info in original_getaddrinfo(requested_host, *args, **kwargs) if info[4][0] in pinned_ips]
-                    return original_getaddrinfo(requested_host, *args, **kwargs)
-                socket_module.getaddrinfo = _pinned_getaddrinfo
+            # [CORRIGE 20/10/2026 -- bug reel trouve par un agent puis
+            # REPRODUIT (serveur HTTP reel, getaddrinfo truque qui leve
+            # gaierror au 1er appel -- la revalidation ci-dessus -- puis
+            # resout vers 127.0.0.1 au 2e appel -- la vraie connexion) :
+            # resolve_public_ips() renvoie un set() VIDE aussi bien pour
+            # "cet hote ne resout nulle part" (sans risque, cf. commentaire
+            # plus haut) QUE pour "la resolution a echoue maintenant mais
+            # pourrait reussir differemment juste apres" (DNS rebinding
+            # avec une reponse SERVFAIL/timeout intercalee). L'ancien code
+            # ne posait AUCUN monkeypatch quand pinned_ips etait vide,
+            # laissant opener.open() refaire sa PROPRE resolution sans
+            # aucune garde -- exactement la race que l'epinglage existe
+            # pour fermer. Desormais le monkeypatch est TOUJOURS installe :
+            # si pinned_ips est vide, toute resolution reelle au moment de
+            # la connexion est refusee (echec clos) plutot que silencieuse-
+            # ment acceptee (echec ouvert).
+            def _pinned_getaddrinfo(requested_host, *args, **kwargs):
+                if requested_host == host:
+                    if not pinned_ips:
+                        raise socket_module.gaierror(
+                            f"résolution SSRF refusée (échec clos) pour {requested_host!r}")
+                    return [info for info in original_getaddrinfo(requested_host, *args, **kwargs) if info[4][0] in pinned_ips]
+                return original_getaddrinfo(requested_host, *args, **kwargs)
+            socket_module.getaddrinfo = _pinned_getaddrinfo
             opener = build_opener(_NoRedirect)
             try:
                 with opener.open(arguments["url"], timeout=timeout) as response:  # nosec B310: validé par policy.py + resolve_public_ips, résolution épinglée, redirections bloquées
