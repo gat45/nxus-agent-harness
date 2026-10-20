@@ -2449,6 +2449,37 @@ class ExternalToolMissingBinaryTests(unittest.TestCase):
         self.assertEqual(policy_denials["no_such_tool_v2"]["details"]["rule"], "P-TOOL-001")
         self.assertEqual(policy_denials["send_external_message"]["details"]["rule"], "P-TOOL-002")
 
+    def test_t86_invoke_writes_a_policy_audit_entry_for_missing_grant_id(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, meme classe que test_t85 : "approbation exacte requise" se
+        # leve APRES que policy.authorize() ait deja ecrit son entree
+        # "policy"/allow -- un lecteur de audit.jsonl voyait donc "allow"
+        # puis RIEN, sans aucune trace structuree que l'execution a ensuite
+        # ete refusee faute de grant. Pire que le bug de test_t85 : l'
+        # autorisation elle-meme semble reussie dans le journal.
+        gateway = self._gateway()
+        operation = PlannedOperation("op-1", "write_workspace_draft",
+                                     {"path": "a.md", "content": "x"}, RiskLevel.R1, "none")
+        manifest = PlanManifest(run_id="r", task_id="t", base_snapshot="x", allowed_paths=["a.md"],
+                               operations=[operation],
+                               created_at=utc_now(), expires_at=utc_now(), plan_hash="x")
+        contract = TaskContract(
+            task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.CODE_CHANGE, max_risk=RiskLevel.R1,
+            allowed_paths=["a.md"], allowed_tools=["write_workspace_draft"],
+        )
+        with self.assertRaises(PolicyDenied):
+            gateway.invoke(contract=contract, manifest=manifest, state=RunState.EXECUTING,
+                           actor_id=contract.actor_id, tool_id="write_workspace_draft",
+                           arguments=operation.arguments, grant_id=None)
+
+        audit_lines = [json.loads(line) for line in gateway.audit.path.read_text(encoding="utf-8").splitlines() if line]
+        policy_entries = [entry for entry in audit_lines if entry["component"] == "policy"]
+        self.assertEqual(len(policy_entries), 2, f"attendu 2 entrees policy (allow puis deny) : {policy_entries}")
+        self.assertEqual(policy_entries[0]["decision"], "allow")
+        self.assertEqual(policy_entries[1]["decision"], "deny")
+        self.assertEqual(policy_entries[1]["details"]["rule"], "P-APPROVAL-001")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

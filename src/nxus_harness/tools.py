@@ -295,6 +295,18 @@ class ToolGateway:
         self.policy.require(decision)
         if tool.requires_approval:
             if not grant_id:
+                # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+                # verifie en vrai, meme classe que le correctif de
+                # registry.get() (commit 5b5c9ae) : cette levee se produit
+                # APRES que policy.authorize() ait deja ecrit son entree
+                # "policy"/allow -- un lecteur de audit.jsonl voit donc
+                # "allow" puis RIEN, sans aucune trace structuree que
+                # l'execution a ensuite ete refusee faute de grant. Pire
+                # que le bug original : l'autorisation elle-meme semble
+                # reussie dans le journal.
+                self.audit.append("policy", tool_id, "deny",
+                                  {"rule": "P-APPROVAL-001", "reason": "approbation exacte requise",
+                                   "owasp_llm_risk": "LLM06:2025 Excessive Agency"})
                 raise PolicyDenied("approbation exacte requise")
             self.approvals.validate_and_consume(grant_id=grant_id, actor_id=actor_id, run_id=manifest.run_id,
                                                 manifest_hash=manifest.manifest_hash, tool_id=tool_id, arguments=arguments)
