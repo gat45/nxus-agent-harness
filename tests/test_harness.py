@@ -1233,6 +1233,32 @@ class HarnessTestCase(unittest.TestCase):
         skeptical_review(recorder, objective="t", plan_text="p", workspace=tmp, results=[])
         self.assertEqual(recorder.seen_temperature, 0.1)
 
+    def test_t70_skeptical_review_redacts_secrets_from_workspace_files(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : skeptical_review() lisait le contenu BRUT de chaque fichier
+        # du workspace et l'envoyait au modele / l'ecrivait dans
+        # skeptical_review.txt SANS AUCUNE redaction, contrairement a
+        # audit.jsonl qui redacte deja les memes motifs. Si un
+        # execute_python approuve ecrit un secret dans le workspace (plutot
+        # que de l'afficher seulement en stdout), ce chemin en produisait
+        # une DEUXIEME copie non redigee, persistee sur disque.
+        from nxus_harness.skeptical_review import skeptical_review
+
+        class _RecordingAdapter:
+            def __init__(self):
+                self.seen_messages = None
+            def structured_chat(self, messages, schema, json_schema=None, code_task=False, temperature_override=None):
+                self.seen_messages = messages
+                return {"avis": "ok"}
+
+        workspace = Path(tempfile.mkdtemp())
+        (workspace / "leaked.txt").write_text("avant TOP_SECRET_DEMO apres", encoding="utf-8")
+        recorder = _RecordingAdapter()
+        skeptical_review(recorder, objective="t", plan_text="p", workspace=workspace, results=[])
+        user_content = recorder.seen_messages[1]["content"]
+        self.assertNotIn("TOP_SECRET_DEMO", user_content, "le secret aurait du etre redacte avant d'etre envoye au modele")
+        self.assertIn("[REDACTED]", user_content)
+
     def test_t34_write_workspace_draft_rejects_oversized_content(self) -> None:
         # [AJOUTÉ 19/10/2026 — checklist "entrées trop grandes", comparée à
         # un autre harnais] Aucune limite n'existait sur la taille du

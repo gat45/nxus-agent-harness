@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .audit import redact
 from .llama_cpp_adapter import LlamaCppAdapter
 
 
@@ -28,9 +29,28 @@ def skeptical_review(adapter: LlamaCppAdapter, *, objective: str, plan_text: str
     température différentes de LlmPlanner (0.1, méfiant) -- jamais pour
     proposer des opérations, seulement pour relire ce qui a déjà été fait.
     Retourne le texte de l'avis (jamais analysé programmatiquement : un
-    humain le lit, le moteur ne le lit jamais)."""
+    humain le lit, le moteur ne le lit jamais).
+
+    [AJOUTE 20/10/2026 -- faille reelle trouvee ET REPRODUITE par un agent :
+    cette fonction lisait le contenu BRUT de chaque fichier du workspace
+    (jusqu'a 2000 caracteres) et l'envoyait tel quel au endpoint llama.cpp
+    local, puis l'ecrivait TEL QUEL dans skeptical_review.txt -- sans
+    AUCUNE redaction, contrairement a audit.jsonl qui redacte deja les
+    memes motifs (_SECRET_PATTERNS, voir audit.py). engine.py's secret_scan
+    detecte deja "TOP_SECRET_" dans le workspace et le fait echouer dans
+    verification.json, mais ce FAIL est consultatif seul -- rien n'empeche
+    ce fichier d'etre quand meme lu et recopie ici. Si un execute_python
+    approuve ECRIT un secret dans le workspace (plutot que de l'afficher
+    seulement en stdout, deja plafonne/capture ailleurs), ce chemin en
+    produisait une DEUXIEME copie non redigee, persistee sur disque, en
+    dehors de toute garantie de redaction documentee
+    (docs/threat-model.md : "redaction avant append audit" -- scope
+    audit.jsonl uniquement). redact() est reutilise ici tel quel, meme
+    motifs que audit.py, pour que cette garantie s'applique aussi a cet
+    artefact."""
     workspace_files = "\n".join(
-        f"--- {path.relative_to(workspace).as_posix()} ---\n{path.read_text(encoding='utf-8', errors='replace')[:2000]}"
+        f"--- {path.relative_to(workspace).as_posix()} ---\n"
+        f"{redact(path.read_text(encoding='utf-8', errors='replace')[:2000])}"
         for path in sorted(workspace.rglob("*")) if path.is_file()
     ) or "(workspace vide)"
     results_summary = "\n".join(
