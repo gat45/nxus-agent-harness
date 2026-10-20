@@ -523,6 +523,38 @@ class HarnessTestCase(unittest.TestCase):
         run_ids = {entry.run_id for entry in entries}
         self.assertEqual(run_ids, {"fresh", "forever"}, "l'entree expiree 'old' n'aurait jamais du etre rappelee")
 
+    def test_t78_recall_survives_one_corrupted_expires_at_among_valid_entries(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : un seul expires_at corrompu/illisible (edition manuelle,
+        # corruption disque) faisait lever parse_utc() une ValueError NON
+        # RATTRAPEE dans recall(), plantant la planification de la mission
+        # ENTIERE (via LlmPlanner._memory_context()) a cause d'UNE SEULE
+        # vieille ligne corrompue parmi des entrees par ailleurs valides.
+        from nxus_harness.memory import MemoryStore
+        import tempfile
+        from pathlib import Path
+
+        root = Path(tempfile.mkdtemp())
+        store = MemoryStore(root)
+        store.record_run(run_id="good-1", tenant_id="tenant-corrupt", task_id="t1",
+                         objective="tache valide 1", final_state="COMPLETED", tool_ids=[], ttl_days=30)
+        store.record_run(run_id="corrupted", tenant_id="tenant-corrupt", task_id="t2",
+                         objective="tache corrompue", final_state="COMPLETED", tool_ids=[], ttl_days=30)
+        store.record_run(run_id="good-2", tenant_id="tenant-corrupt", task_id="t3",
+                         objective="tache valide 2", final_state="COMPLETED", tool_ids=[])
+
+        memory_path = root / "tenant-corrupt.jsonl"
+        lines = [json.loads(line) for line in memory_path.read_text(encoding="utf-8").splitlines() if line]
+        for entry in lines:
+            if entry["run_id"] == "corrupted":
+                entry["expires_at"] = "not-a-real-timestamp"
+        memory_path.write_text("\n".join(json.dumps(entry) for entry in lines) + "\n", encoding="utf-8")
+
+        entries = store.recall("tenant-corrupt")  # ne doit pas lever
+        run_ids = {entry.run_id for entry in entries}
+        self.assertEqual(run_ids, {"good-1", "corrupted", "good-2"},
+                         "l'entree corrompue doit rester visible (echec ouvert), pas faire disparaitre les autres")
+
     def test_t62_memory_context_neutralizes_chat_template_control_sequences(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai : contract.objective n'est jamais sanitise et memory.py le

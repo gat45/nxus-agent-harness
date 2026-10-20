@@ -85,5 +85,26 @@ class MemoryStore:
         # sinon un vieux run expiré pourrait quand même occuper une place
         # dans la fenêtre récente si peu de runs plus récents existent.
         now = parse_utc(utc_now())
-        entries = [entry for entry in entries if entry.expires_at is None or parse_utc(entry.expires_at) > now]
+
+        def _not_expired(entry: MemoryEntry) -> bool:
+            if entry.expires_at is None:
+                return True
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai : un seul expires_at corrompu/illisible
+            # (edition manuelle, corruption disque) faisait lever
+            # parse_utc() une ValueError NON RATTRAPEE, qui remontait hors
+            # de recall() -- donc hors de LlmPlanner._memory_context() --
+            # et plantait la planification de la mission ENTIERE a cause
+            # d'UNE SEULE vieille ligne corrompue parmi des entrees par
+            # ailleurs valides. Echec OUVERT (traitee comme non expiree)
+            # plutot que ferme : la peremption est une aide de fenetrage,
+            # pas un controle de securite -- une entree illisible reste
+            # visible plutot que de faire disparaitre TOUTE la memoire du
+            # tenant.
+            try:
+                return parse_utc(entry.expires_at) > now
+            except ValueError:
+                return True
+
+        entries = [entry for entry in entries if _not_expired(entry)]
         return entries[-limit:]
