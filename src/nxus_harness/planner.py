@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from .audit import redact
 from .models import (PlanManifest, PlannedOperation, RiskLevel, TaskContract, TaskProfile, content_hash,
                      flatten_for_markdown, parse_utc, utc_now)
 
@@ -68,7 +69,22 @@ class SimulatedPlanner:
             "## Opérations proposées",
         ]
         for operation in operations:
-            lines.append(f"- `{operation.tool_id}` : {operation.arguments} (R{int(operation.risk)}, vérification : {operation.verification})")
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai (run reel jusqu'a COMPLETED, PLAN.md relu,
+            # secret AKIA... present verbatim) : cette ligne interpolait le
+            # repr brut de operation.arguments SANS passer par
+            # audit.redact() -- contrairement a AuditLog.append(), qui
+            # redacte deja les memes motifs dans son champ "details" avant
+            # d'ecrire sur disque. Un write_workspace_draft/execute_python
+            # dont le contenu/code contient un secret (cle AWS, token,
+            # cle privee) l'ecrivait donc intact dans PLAN.md, lui-meme
+            # reservi tel quel par view_runs.py sur /run/<tenant>/<run_id>
+            # (html.escape() seul, aucune redaction) -- elargissant
+            # l'exposition du fichier local au port HTTP. redact() est
+            # recursif sur les dicts (voir audit.py) : applique directement
+            # sur operation.arguments avant le repr.
+            safe_arguments = redact(operation.arguments)
+            lines.append(f"- `{operation.tool_id}` : {safe_arguments} (R{int(operation.risk)}, vérification : {operation.verification})")
         lines.extend(["", "## Risques et rollback", "- Aucun réseau, secret, shell ou action externe dans le MVP.", "- La seule écriture R1 est réversible : suppression du brouillon dans le workspace de run."])
         return "\n".join(lines) + "\n"
 

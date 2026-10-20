@@ -97,6 +97,20 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual([op.tool_id for op in manifest.operations], ["write_workspace_draft", "run_declared_check"],
                          "manifest.operations ne doit jamais être affecté, seul le rendu Markdown était vulnérable")
 
+    def test_t71_plan_markdown_redacts_secrets_in_operation_arguments(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (run reel jusqu'a COMPLETED, PLAN.md relu) : _render_plan()
+        # interpolait le repr brut de operation.arguments SANS passer par
+        # audit.redact(), contrairement a AuditLog.append() qui redacte
+        # deja les memes motifs. Un write_workspace_draft dont le contenu
+        # contient une cle AWS l'ecrivait donc intact dans PLAN.md --
+        # lui-meme reservi tel quel par view_runs.py sur /run/<tenant>/<run_id>.
+        contract = replace(self.contract(), desired_draft="voici une cle : AKIAIOSFODNN7EXAMPLE")
+        context = self.engine.run_demo(contract)
+        plan_text = (context.run_dir / "PLAN.md").read_text(encoding="utf-8")
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", plan_text, "la cle AWS aurait du etre redactee dans PLAN.md")
+        self.assertIn("[REDACTED]", plan_text)
+
     def test_t65_report_markdown_cannot_be_spoofed_via_objective_newlines(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai (report.md reellement ecrit et relu) : MEME faille que
