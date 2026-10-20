@@ -2480,6 +2480,37 @@ class ExternalToolMissingBinaryTests(unittest.TestCase):
         self.assertEqual(policy_entries[1]["decision"], "deny")
         self.assertEqual(policy_entries[1]["details"]["rule"], "P-APPROVAL-001")
 
+    def test_t87_invoke_writes_an_approval_deny_audit_entry_for_an_invalid_grant(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, troisieme instance de la meme classe que test_t85/test_t86 :
+        # validate_and_consume() a QUATRE motifs distincts de refus (grant
+        # inconnu, deja consomme, expire, lie a une action differente) --
+        # tous non rattrapes dans invoke(). policy.authorize() a deja ecrit
+        # "allow" avant d'atteindre cet appel : le journal montrait "allow"
+        # puis RIEN pour les quatre cas. Ce test couvre le cas le plus
+        # simple a reproduire (grant_id inexistant).
+        gateway = self._gateway()
+        operation = PlannedOperation("op-1", "write_workspace_draft",
+                                     {"path": "a.md", "content": "x"}, RiskLevel.R1, "none")
+        manifest = PlanManifest(run_id="r", task_id="t", base_snapshot="x", allowed_paths=["a.md"],
+                               operations=[operation],
+                               created_at=utc_now(), expires_at=utc_now(), plan_hash="x")
+        contract = TaskContract(
+            task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.CODE_CHANGE, max_risk=RiskLevel.R1,
+            allowed_paths=["a.md"], allowed_tools=["write_workspace_draft"],
+        )
+        with self.assertRaises(PolicyDenied):
+            gateway.invoke(contract=contract, manifest=manifest, state=RunState.EXECUTING,
+                           actor_id=contract.actor_id, tool_id="write_workspace_draft",
+                           arguments=operation.arguments, grant_id="grant-id-inexistant")
+
+        audit_lines = [json.loads(line) for line in gateway.audit.path.read_text(encoding="utf-8").splitlines() if line]
+        approval_entries = [entry for entry in audit_lines if entry["component"] == "approval"]
+        self.assertEqual(len(approval_entries), 1, f"attendu 1 entree approval/deny : {approval_entries}")
+        self.assertEqual(approval_entries[0]["decision"], "deny")
+        self.assertIn("inconnue", approval_entries[0]["details"]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

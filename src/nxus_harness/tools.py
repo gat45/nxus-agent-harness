@@ -308,8 +308,22 @@ class ToolGateway:
                                   {"rule": "P-APPROVAL-001", "reason": "approbation exacte requise",
                                    "owasp_llm_risk": "LLM06:2025 Excessive Agency"})
                 raise PolicyDenied("approbation exacte requise")
-            self.approvals.validate_and_consume(grant_id=grant_id, actor_id=actor_id, run_id=manifest.run_id,
-                                                manifest_hash=manifest.manifest_hash, tool_id=tool_id, arguments=arguments)
+            try:
+                self.approvals.validate_and_consume(grant_id=grant_id, actor_id=actor_id, run_id=manifest.run_id,
+                                                    manifest_hash=manifest.manifest_hash, tool_id=tool_id, arguments=arguments)
+            except PolicyDenied as exc:
+                # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+                # verifie en vrai, meme classe que les deux correctifs
+                # precedents (5b5c9ae, 5c08a57) : validate_and_consume()
+                # a QUATRE motifs distincts de refus (grant inconnu,
+                # deja consomme, expire, ou lie a une action differente)
+                # -- tous non rattrapes ici. policy.authorize() a deja
+                # ecrit "allow" avant d'atteindre cette ligne : sans ce
+                # correctif, le journal montre "allow" puis RIEN pour ces
+                # quatre cas, aucun moyen de savoir que l'execution a
+                # ensuite ete refusee faute de grant valide.
+                self.audit.append("approval", "consume", "deny", {"grant_id": grant_id, "tool_id": tool_id, "reason": str(exc)})
+                raise
             self.audit.append("approval", "consume", "allow", {"grant_id": grant_id, "tool_id": tool_id})
         result = self._execute(tool_id, arguments, budget_seconds=contract.budget_seconds, prior_results=prior_results)
         self.audit.append("gateway", tool_id, "executed", {"result_hash": content_hash(result), "tool_version": tool.version})
