@@ -877,6 +877,37 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual((context.workspace / "preuve.txt").read_text(encoding="utf-8"), "ok")
         self.assertEqual(context.results[0]["result"]["exit_code"], 0)
 
+    def test_t80_write_workspace_draft_rejects_directory_collision_cleanly(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : si la cible existe deja comme REPERTOIRE (collision avec
+        # une operation precedente, nom reutilise par le modele),
+        # target.write_text() levait un PermissionError/IsADirectoryError
+        # BRUT non rattrape, au lieu du PolicyDenied/ValidationError propre
+        # que le reste du codebase utilise deja pour les conditions
+        # previsibles.
+        gateway = ToolGateway(workspace=self.root / "ws-dircollision", fixtures=self.root / "fixtures",
+                              registry=ToolRegistry(), policy=PolicyEngine(),
+                              approvals=ApprovalService(self.root / "approvals-dircollision.json"),
+                              audit=AuditLog(self.root / "audit-dircollision.jsonl", run_id="r", tenant_id="t"))
+        (gateway.workspace / "drafts" / "existing_dir").mkdir(parents=True)
+        with self.assertRaises(PolicyDenied):
+            gateway._execute("write_workspace_draft", {"path": "drafts/existing_dir", "content": "x"}, budget_seconds=5)
+
+    def test_t80_write_workspace_draft_changed_reflects_real_content_diff(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent : "changed"
+        # etait toujours True, meme en reecrivant un contenu identique au
+        # fichier deja present -- un champ qui ment dans un resultat audite.
+        gateway = ToolGateway(workspace=self.root / "ws-changed", fixtures=self.root / "fixtures",
+                              registry=ToolRegistry(), policy=PolicyEngine(),
+                              approvals=ApprovalService(self.root / "approvals-changed.json"),
+                              audit=AuditLog(self.root / "audit-changed.jsonl", run_id="r", tenant_id="t"))
+        first = gateway._execute("write_workspace_draft", {"path": "a.md", "content": "hello"}, budget_seconds=5)
+        self.assertTrue(first["changed"])
+        second = gateway._execute("write_workspace_draft", {"path": "a.md", "content": "hello"}, budget_seconds=5)
+        self.assertFalse(second["changed"], "reecrire un contenu identique ne devrait pas etre signale comme un changement")
+        third = gateway._execute("write_workspace_draft", {"path": "a.md", "content": "different"}, budget_seconds=5)
+        self.assertTrue(third["changed"])
+
     def test_t72_scope_violation_details_are_redacted_in_report_and_verification_json(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai : le check "scope" construit ses details depuis les noms de

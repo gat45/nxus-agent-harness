@@ -307,9 +307,29 @@ class ToolGateway:
             return {"query": arguments["query"], "matches": matches, "evidence_ids": evidence_ids, "untrusted": True}
         if tool_id == "write_workspace_draft":
             target = self._resolve_workspace_path(arguments["path"])
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai : si `target` existe deja comme REPERTOIRE
+            # (collision avec une operation precedente, nom reutilise par
+            # le modele), target.write_text() levait un PermissionError/
+            # IsADirectoryError brut non rattrape -- aucun PolicyDenied/
+            # ValidationError propre comme le reste du codebase utilise
+            # deja pour les conditions previsibles (fixture absente,
+            # resultat execute_python manquant, stdout tronque). Convertit
+            # cette condition prevue en erreur typee, geree, plutot que de
+            # laisser une exception OS brute (avec le chemin natif complet
+            # dans son message) remonter jusqu'au moteur.
+            if target.is_dir():
+                raise PolicyDenied("cible d'écriture existante est un répertoire")
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent : "changed"
+            # etait toujours True, meme en reecrivant un contenu identique
+            # -- inoffensif aujourd'hui (rien en aval ne lit ce champ,
+            # verifie par l'agent), mais corrige par hygiene plutot que de
+            # laisser un champ qui ment dans un resultat audite.
+            previous_content = target.read_text(encoding="utf-8") if target.is_file() else None
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(arguments["content"], encoding="utf-8")
-            return {"path": arguments["path"], "content_hash": content_hash(arguments["content"]), "changed": True}
+            changed = previous_content != arguments["content"]
+            return {"path": arguments["path"], "content_hash": content_hash(arguments["content"]), "changed": changed}
         if tool_id == "run_declared_check":
             check = arguments["check"]
             if check == "draft_exists":
