@@ -2399,6 +2399,26 @@ class ExternalToolMissingBinaryTests(unittest.TestCase):
         self.assertIn(str(fake_cwd), captured_args["args"][0],
                       "repo_root aurait du etre Path.cwd() (le repertoire 'figé' simulé), pas l'arbre du checkout")
 
+    def test_t84_unknown_tool_id_in_allowed_tools_raises_validation_error_not_policy_denied(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : TaskContract.validate() ne verifie jamais que chaque entree
+        # de allowed_tools nomme un outil reel du ToolRegistry -- un tool_id
+        # mal orthographie (ex. "write_workspace_drafts" au lieu de
+        # "write_workspace_draft") passait validate() sans probleme, puis
+        # faisait planter _build_json_schema() avec un PolicyDenied brut en
+        # PLEINE PLANIFICATION, au lieu du ValidationError propre qu'un
+        # appelant s'attendrait a intercepter au moment de valider le
+        # contrat.
+        contract = TaskContract(
+            task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.AGENTIC_EXECUTION, max_risk=RiskLevel.R2,
+            allowed_tools=["write_workspace_drafts"],  # faute de frappe deliberee
+        )
+        contract.validate()  # ne leve rien aujourd'hui -- confirme le trou
+        planner = LlmPlanner(_FakeAdapter({"operations": []}))
+        with self.assertRaises(ValidationError):
+            planner._propose_operations(contract, max_retries=0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -23,7 +23,8 @@ import ast
 
 from .llama_cpp_adapter import LlamaCppAdapter
 from .memory import MemoryStore
-from .models import DEFAULT_DESIRED_DRAFT, PlanManifest, PlannedOperation, TaskContract, ValidationError, content_hash, parse_utc, utc_now
+from .models import (DEFAULT_DESIRED_DRAFT, PlanManifest, PlannedOperation, PolicyDenied, TaskContract, ValidationError,
+                     content_hash, parse_utc, utc_now)
 from .planner import ReflectionReview, SimulatedPlanner
 from .tools import ToolRegistry
 
@@ -176,7 +177,25 @@ class LlmPlanner:
         type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
         branches = []
         for tool_id in allowed_tools:
-            properties = self._registry.get(tool_id).schema["properties"]
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai : TaskContract.validate() ne verifie JAMAIS
+            # que chaque entree de allowed_tools nomme un outil reel du
+            # ToolRegistry -- un tool_id mal orthographie ou un nom
+            # d'outil renomme ailleurs sans etre mis a jour ici passait
+            # donc validate() sans probleme, puis faisait planter la
+            # construction du schema avec un PolicyDenied("outil inconnu")
+            # brut, en PLEINE PLANIFICATION plutot qu'au moment de la
+            # validation du contrat ou un appelant s'attendrait a
+            # intercepter un ValidationError. Les deux exceptions sont
+            # distinctes dans ce codebase (ValidationError = "contrat
+            # invalide", PolicyDenied = "action refusee par la policy") --
+            # les confondre ici rendait impossible pour un appelant de
+            # distinguer "mon contrat reference un outil qui n'existe pas"
+            # de "la policy a reellement refuse un appel autorise".
+            try:
+                properties = self._registry.get(tool_id).schema["properties"]
+            except PolicyDenied as exc:
+                raise ValidationError(f"le contrat référence un outil inconnu : {tool_id!r}") from exc
             branches.append({
                 "type": "object",
                 "properties": {
