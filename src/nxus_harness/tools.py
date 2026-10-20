@@ -268,7 +268,25 @@ class ToolGateway:
     def invoke(self, *, contract: TaskContract, manifest: PlanManifest, state: RunState,
                actor_id: str, tool_id: str, arguments: dict[str, Any], grant_id: str | None = None,
                prior_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        tool = self.registry.get(tool_id)
+        try:
+            tool = self.registry.get(tool_id)
+        except PolicyDenied as exc:
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai : registry.get() s'execute AVANT
+            # policy.authorize(), donc un tool_id inconnu ou desactive
+            # (enabled=False, ex. send_external_message, volontairement
+            # desactive pour verifier le refus des actions R4) ne
+            # produisait JAMAIS l'entree d'audit "policy" structuree
+            # (rule_id/owasp_llm_risk) que TOUS les autres refus de cette
+            # meme fonction obtiennent -- seule une trace generique
+            # "state_machine"/"execution_blocked" (engine.py) apparaissait
+            # plus tard, sans rule_id ni owasp_llm_risk. Une requete
+            # d'audit filtrant stage=="policy" pour les refus marques OWASP
+            # manquait donc silencieusement ces deux cas. Rule_id distinct
+            # par cause pour que l'audit distingue les deux.
+            rule_id = "P-TOOL-001" if str(exc) == "outil inconnu" else "P-TOOL-002"
+            self.audit.append("policy", tool_id, "deny", {"rule": rule_id, "reason": str(exc), "owasp_llm_risk": None})
+            raise
         self.registry.validate_arguments(tool, arguments)
         decision = self.policy.authorize(contract=contract, manifest=manifest, state=state,
                                          tool_id=tool_id, arguments=arguments, tool_risk=tool.risk)

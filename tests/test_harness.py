@@ -2419,6 +2419,36 @@ class ExternalToolMissingBinaryTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             planner._propose_operations(contract, max_retries=0)
 
+    def test_t85_invoke_writes_a_policy_audit_entry_for_unknown_and_disabled_tools(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : ToolGateway.invoke() appelle registry.get() AVANT
+        # policy.authorize() -- un tool_id inconnu ou desactive
+        # (enabled=False, ex. send_external_message) ne produisait donc
+        # JAMAIS l'entree d'audit "policy" structuree (rule_id/
+        # owasp_llm_risk) que tous les autres refus obtiennent. Une requete
+        # d'audit filtrant stage=="policy" manquait silencieusement ces
+        # deux cas.
+        gateway = self._gateway()
+        manifest = PlanManifest(run_id="r", task_id="t", base_snapshot="x", allowed_paths=[], operations=[],
+                               created_at=utc_now(), expires_at=utc_now(), plan_hash="x")
+        contract = TaskContract(
+            task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.AGENTIC_EXECUTION, max_risk=RiskLevel.R2, allowed_tools=[],
+        )
+
+        for bad_tool_id in ("no_such_tool_v2", "send_external_message"):
+            with self.assertRaises(PolicyDenied):
+                gateway.invoke(contract=contract, manifest=manifest, state=RunState.EXECUTING,
+                               actor_id=contract.actor_id, tool_id=bad_tool_id, arguments={})
+
+        audit_lines = [json.loads(line) for line in gateway.audit.path.read_text(encoding="utf-8").splitlines() if line]
+        policy_denials = {entry["action"]: entry for entry in audit_lines
+                          if entry["component"] == "policy" and entry["decision"] == "deny"}
+        self.assertIn("no_such_tool_v2", policy_denials)
+        self.assertIn("send_external_message", policy_denials)
+        self.assertEqual(policy_denials["no_such_tool_v2"]["details"]["rule"], "P-TOOL-001")
+        self.assertEqual(policy_denials["send_external_message"]["details"]["rule"], "P-TOOL-002")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
