@@ -17,6 +17,7 @@ from datetime import timedelta
 import json
 from pathlib import Path
 import re
+import time
 
 import ast
 
@@ -50,7 +51,22 @@ class LlmPlanner:
         self._registry = ToolRegistry()
 
     def create(self, contract: TaskContract, run_id: str, run_dir: Path) -> PlanManifest:
-        operations = self._propose_operations(contract, max_retries=1)
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (adaptateur factice qui dort 8s par appel, syntax error au
+        # 1er essai) : la relance d'_propose_operations() sur une erreur de
+        # syntaxe execute_python fait un DEUXIEME appel structured_chat()
+        # complet, chacun pouvant durer jusqu'a LlamaCppProfile.timeout_seconds
+        # (plafonne a 120s) -- SANS AUCUN rapport avec contract.budget_seconds,
+        # qui ne borne QUE l'execution des outils (tools.py), jamais la phase
+        # de planification. Mesure : budget_seconds=1 ET budget_seconds=10
+        # produisaient EXACTEMENT le meme temps reel (16s, 2 appels de 8s) --
+        # le champ cense bornere la mission n'avait aucun effet ici, pire
+        # qu'un simple timeout car le doublement est silencieux et automatique.
+        # Deadline derivee du budget du contrat : la relance n'est tentee que
+        # s'il reste du budget, sinon on remonte l'erreur immediatement
+        # plutot que de bruler un 2e appel complet hors de tout budget.
+        deadline = time.monotonic() + contract.budget_seconds
+        operations = self._propose_operations(contract, max_retries=1, deadline=deadline)
         plan = SimulatedPlanner._render_plan(contract, operations)
         plan_path = run_dir / "PLAN.md"
         plan_path.write_text(plan, encoding="utf-8")
@@ -207,7 +223,7 @@ class LlmPlanner:
         return errors
 
     def _propose_operations(self, contract: TaskContract, *, max_retries: int = 0,
-                            correction: str | None = None) -> list[PlannedOperation]:
+                            correction: str | None = None, deadline: float | None = None) -> list[PlannedOperation]:
         allowed_tools = sorted(contract.allowed_tools or [])
         if not allowed_tools:
             raise ValidationError("le contrat ne déclare aucun outil autorisé pour le planificateur LLM")
@@ -327,9 +343,12 @@ class LlmPlanner:
                 f"le modèle a proposé {len(proposed)} opérations, plafond {ReflectionReview.MAX_OPERATIONS_PER_PLAN} dépassé")
         syntax_errors = self._syntax_errors(proposed)
         if syntax_errors:
-            if max_retries > 0:
+            if max_retries > 0 and (deadline is None or time.monotonic() < deadline):
                 return self._propose_operations(contract, max_retries=max_retries - 1,
-                                                correction="; ".join(syntax_errors))
+                                                correction="; ".join(syntax_errors), deadline=deadline)
+            if max_retries > 0:
+                raise ValidationError(
+                    "code execute_python invalide, budget_seconds épuisé avant la relance: " + "; ".join(syntax_errors))
             raise ValidationError("code execute_python invalide apres relance: " + "; ".join(syntax_errors))
         operations: list[PlannedOperation] = []
         for index, item in enumerate(proposed):

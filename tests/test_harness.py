@@ -1828,5 +1828,51 @@ class ViewRunsLiveErrorSurfacingTests(unittest.TestCase):
         self.assertIn("plafond 50", body, "la raison reelle de l'abandon n'apparait pas sur /live")
 
 
+class LlmPlannerRetryBudgetTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis mesure en
+    vrai : la relance d'_propose_operations() sur une erreur de syntaxe
+    execute_python faisait un DEUXIEME appel structured_chat() complet
+    (chacun jusqu'a LlamaCppProfile.timeout_seconds), SANS AUCUN rapport
+    avec contract.budget_seconds -- budget_seconds=1 et budget_seconds=10
+    produisaient le meme temps reel (2 appels lents), le champ cense
+    bornere la mission n'ayant aucun effet sur la phase de planification."""
+
+    class _SlowThenOkAdapter:
+        """Premier appel : code execute_python invalide (declenche la
+        relance). Deuxieme appel (si jamais atteint) : code valide. Chaque
+        appel dort `delay` secondes pour simuler un llama-server lent."""
+
+        def __init__(self, delay: float) -> None:
+            self.delay = delay
+            self.calls = 0
+
+        def structured_chat(self, messages, schema, json_schema=None, *, code_task=False):
+            self.calls += 1
+            time.sleep(self.delay)
+            if self.calls == 1:
+                return {"operations": [{"tool_id": "execute_python", "arguments": {"code": "def ("}}]}
+            return {"operations": [{"tool_id": "execute_python", "arguments": {"code": "print(1)"}}]}
+
+    def test_t69_retry_is_skipped_once_budget_seconds_is_exhausted(self) -> None:
+        # delay (1.5s) > budget_seconds (1s, le minimum valide) : le premier
+        # appel seul epuise deja le budget, donc la relance doit etre
+        # sautee plutot que de bruler un 2e appel complet.
+        adapter = self._SlowThenOkAdapter(delay=1.5)
+        contract = TaskContract(
+            task_id="t", tenant_id="tn", actor_id="op", objective="x", acceptance_criteria=["x"],
+            profile=TaskProfile.AGENTIC_EXECUTION, max_risk=RiskLevel.R2,
+            allowed_tools=["execute_python"], budget_seconds=1,
+        )
+        planner = LlmPlanner(adapter)
+        with self.assertRaises(ValidationError) as ctx:
+            planner.create(contract, "run-budget-test", Path(tempfile.mkdtemp()))
+        # Avant le correctif : la relance etait TOUJOURS tentee, quel que
+        # soit budget_seconds -- ce test aurait vu `adapter.calls == 2` et
+        # un message d'erreur different ("apres relance" plutot que
+        # "budget_seconds épuisé").
+        self.assertIn("budget_seconds épuisé", str(ctx.exception))
+        self.assertEqual(adapter.calls, 1, "la relance n'aurait pas du avoir lieu, le budget etait deja epuise")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
