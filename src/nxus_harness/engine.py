@@ -369,11 +369,29 @@ class HarnessEngine:
         # verify_and_complete(), jamais une proposition non vérifiée. Le
         # harness est seul auteur de cette entrée (ni le modèle, ni une
         # fixture) — voir memory.py pour la distinction avec evidence.jsonl.
-        self.memory.record_run(
-            run_id=context.run_id, tenant_id=context.contract.tenant_id, task_id=context.contract.task_id,
-            objective=context.contract.objective, final_state=target.value,
-            tool_ids=[entry["tool_id"] for entry in (context.results or [])],
-        )
+        try:
+            self.memory.record_run(
+                run_id=context.run_id, tenant_id=context.contract.tenant_id, task_id=context.contract.task_id,
+                objective=context.contract.objective, final_state=target.value,
+                tool_ids=[entry["tool_id"] for entry in (context.results or [])],
+            )
+        except OSError:
+            # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai, bout en bout via `cli.py approve` reel : a
+            # ce stade, _transition() vers COMPLETED/FAILED a DEJA reussi
+            # et persiste sur disque -- c'est le resultat faisant autorite
+            # du run. record_run() n'est qu'un canal secondaire (memoire
+            # inter-run, jamais consultee pour decider si CE run a reussi).
+            # Une panne disque ici (memory.jsonl plein/permissions) levait
+            # une OSError non rattrapee qui remontait jusqu'a cli.py, ou
+            # elle tombait dans le except generique (OSError, ValidationError,
+            # ValueError) -- un run REELLEMENT COMPLETED etait alors
+            # rapporte a l'appelant comme un echec (exit 2), uniquement a
+            # cause d'un effet de bord sans rapport avec le resultat du run.
+            # Best-effort ici, comme verification.json/report.md (deja
+            # traites comme secondaires par construction) : le run reste
+            # COMPLETED que cette ecriture reussisse ou non.
+            pass
         return results
 
     def abort(self, context: RunContext, reason: str) -> None:

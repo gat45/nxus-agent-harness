@@ -2598,12 +2598,68 @@ class VerificationJsonOrderingTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.engine.verify_and_complete(context)
         finally:
-            engine_module.HarnessEngine._persist_state = original_persist_state
+            # [CORRIGE] original_persist_state recupere via l'acces de
+            # classe est deja la fonction DEballee de son staticmethod --
+            # la reaffecter telle quelle en fait un attribut de classe
+            # "fonction normale", qui se bind alors comme methode
+            # d'instance (self implicite) pour tout appel self._persist_state(context)
+            # ulterieur -- polluant TOUS les tests suivants dans le meme
+            # process avec un TypeError. Re-envelopper dans staticmethod()
+            # pour restaurer exactement la forme d'origine.
+            engine_module.HarnessEngine._persist_state = staticmethod(original_persist_state)
 
         self.assertFalse((context.run_dir / "verification.json").is_file(),
                          "verification.json ne doit jamais exister si la transition finale a echoue")
         state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
         self.assertEqual(state_on_disk, "SECURITY_GATE")
+
+
+class MemoryRecordRunBestEffortTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai, bout en bout via `cli.py approve` reel : memory.record_run()
+    s'execute APRES que la transition finale (COMPLETED/FAILED) ait DEJA
+    reussi et persiste sur disque -- c'est le resultat faisant autorite
+    du run. Une panne disque sur ce canal secondaire (memory.jsonl)
+    levait une OSError non rattrapee qui remontait jusqu'a cli.py, ou
+    elle tombait dans le except generique -- un run REELLEMENT COMPLETED
+    etait alors rapporte a l'appelant comme un echec (exit 2)."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "fixtures").mkdir()
+        shutil.copy(Path(__file__).resolve().parents[1] / "fixtures" / "corpus.md", self.root / "fixtures" / "corpus.md")
+        self.engine = HarnessEngine(self.root)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_t90_approve_cli_reports_success_even_if_memory_record_run_fails(self) -> None:
+        from nxus_harness import cli, memory as memory_module
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.submit(contract)
+        self.assertEqual(context.state, RunState.AWAITING_APPROVAL)
+
+        original_record_run = memory_module.MemoryStore.record_run
+        memory_module.MemoryStore.record_run = lambda self, **kwargs: (_ for _ in ()).throw(OSError("disque plein (simulé) pendant memory.jsonl"))
+        try:
+            exit_code = cli.main([
+                "--root", str(self.root), "approve", contract.tenant_id, context.run_id,
+                "--actor", contract.actor_id, "--yes",
+            ])
+        finally:
+            memory_module.MemoryStore.record_run = original_record_run
+
+        self.assertEqual(exit_code, 0, "un run reellement COMPLETED ne doit pas etre rapporte comme un echec")
+        state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state_on_disk, "COMPLETED")
 
 
 if __name__ == "__main__":
