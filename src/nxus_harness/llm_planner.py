@@ -193,9 +193,21 @@ class LlmPlanner:
             # distinguer "mon contrat reference un outil qui n'existe pas"
             # de "la policy a reellement refuse un appel autorise".
             try:
-                properties = self._registry.get(tool_id).schema["properties"]
+                tool_schema = self._registry.get(tool_id).schema
+                properties = tool_schema["properties"]
             except PolicyDenied as exc:
                 raise ValidationError(f"le contrat référence un outil inconnu : {tool_id!r}") from exc
+            # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai (inerte aujourd'hui, mais pret a mordre) :
+            # cette ligne forcait TOUJOURS "required": list(properties) --
+            # c'est-a-dire TOUTES les proprietes de l'outil, sans jamais
+            # lire le "required" propre a l'outil dans le ToolRegistry.
+            # Aucun impact observable aujourd'hui car tous les outils
+            # actuels ont required == properties (tout obligatoire), mais
+            # le premier outil avec un argument reellement OPTIONNEL
+            # forcerait quand meme le modele a halluciner une valeur pour
+            # ce champ, la grammaire GBNF generee ne respectant pas la
+            # distinction requis/optionnel que le registre declare deja.
             branches.append({
                 "type": "object",
                 "properties": {
@@ -203,7 +215,7 @@ class LlmPlanner:
                     "arguments": {
                         "type": "object",
                         "properties": {name: {"type": type_map.get(py_type, "string")} for name, py_type in properties.items()},
-                        "required": list(properties),
+                        "required": list(tool_schema.get("required", properties)),
                         "additionalProperties": False,
                     },
                 },
@@ -236,7 +248,22 @@ class LlmPlanner:
             if item.get("tool_id") == "execute_python":
                 code = (item.get("arguments") or {}).get("code", "")
                 try:
-                    ast.parse(code)
+                    tree = ast.parse(code)
+                    # [AJOUTE 21/10/2026 -- bug reel trouve par un agent
+                    # puis verifie en vrai : ast.parse("") n'est PAS une
+                    # SyntaxError -- une chaine vide (ou purement faite de
+                    # commentaires/espaces) est un module Python valide
+                    # sans aucune instruction. Ce code passait donc la
+                    # grammaire GBNF (aucune contrainte minLength) ET ce
+                    # filtre syntaxique sans jamais declencher la relance
+                    # -- un plan avec execute_python("") n'etait rattrape
+                    # qu'INDIRECTEMENT, bien plus tard, par la regle
+                    # "AGENTIC_EXECUTION exige un check declare" (un effet
+                    # de bord d'une autre regle, pas la verification
+                    # censee couvrir la forme d'execute_python elle-meme) --
+                    # et pas du tout pour un profil sans cette exigence.
+                    if not tree.body:
+                        errors.append(f"code execute_python vide ou sans instruction : {code!r}")
                 except SyntaxError as exc:
                     errors.append(f"code execute_python invalide (SyntaxError: {exc.msg} ligne {exc.lineno}): {code!r}")
                 except (RecursionError, ValueError, MemoryError) as exc:

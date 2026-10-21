@@ -691,6 +691,23 @@ class HarnessEngine:
             f"| {item.check_id} | {item.status.value} | {flatten_for_markdown(item.details or item.evidence)} |"
             for item in results
         )
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : cette ligne affirmait "Aucun shell, reseau... n'a ete
+        # active" de maniere INCONDITIONNELLE, meme sur un run qui a
+        # REELLEMENT execute execute_python/fetch_url (confirme : stdout
+        # d'un execute_python reel, exit_code 0, puis report.md contenant
+        # malgre tout cette phrase juste apres la ligne listant l'outil
+        # execute). Meme classe que le correctif miroir sur PLAN.md
+        # (planner.py._render_plan) -- ici c'est l'artefact de FIN de run,
+        # lu par l'humain ou un auditeur qui relit un run termine.
+        network_or_shell_capable_tools = {"execute_python", "fetch_url", "rea_inspect", "smokinggun_scan"}
+        executed_tool_ids = [entry["tool_id"] for entry in (context.results or [])]
+        activity_line = (
+            "- Outils réseau/exécution de code réellement invoqués (voir la liste ci-dessus) : "
+            "aucune garantie d'absence de réseau ou de shell ne s'applique à ce run."
+            if any(tool_id in network_or_shell_capable_tools for tool_id in executed_tool_ids)
+            else "- Aucun shell, réseau, secret, MCP ou effet externe n’a été activé."
+        )
         report = f"""# Rapport de run — {context.run_id}
 
 **État final :** `{context.state.value}`
@@ -700,8 +717,8 @@ class HarnessEngine:
 
 ## Plan et autorisation
 - Manifeste : `{context.manifest.manifest_hash if context.manifest else 'absent'}`
-- Outils exécutés : {', '.join(entry['tool_id'] for entry in (context.results or [])) or 'aucun'}
-- Aucun shell, réseau, secret, MCP ou effet externe n’a été activé.
+- Outils exécutés : {', '.join(executed_tool_ids) or 'aucun'}
+{activity_line}
 
 ## Vérifications
 | Contrôle | Statut | Preuve / détail |

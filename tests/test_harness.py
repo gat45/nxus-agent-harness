@@ -1037,6 +1037,43 @@ class HarnessTestCase(unittest.TestCase):
                          "le petit-fils detache doit avoir ete tue avec le process direct, "
                          "pas avoir survecu a la fin du run")
 
+    def test_t116_plan_md_does_not_falsely_claim_no_network_or_shell_when_execute_python_is_proposed(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : PLAN.md affirmait INCONDITIONNELLEMENT "Aucun reseau,
+        # secret, shell ou action externe dans le MVP" meme quand la liste
+        # d'operations juste au-dessus contient un execute_python/fetch_url
+        # reel -- exactement le document que l'humain lit pour approuver
+        # (flux submit/approve).
+        contract = self._agentic_contract(allowed_paths=["preuve.txt"],
+                                          allowed_tools=["execute_python", "run_declared_check"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "execute_python", "arguments": {"code": "open('preuve.txt', 'w').write('ok')"}},
+        ]})
+        context = self.engine.submit(contract, planner=LlmPlanner(fake))
+        plan_md = (context.run_dir / "PLAN.md").read_text(encoding="utf-8")
+        self.assertIn("execute_python", plan_md)
+        self.assertNotIn("Aucun réseau, secret, shell ou action externe", plan_md,
+                         "PLAN.md ne doit pas affirmer l'absence de reseau/shell quand execute_python est propose")
+
+    def test_t116_report_md_does_not_falsely_claim_nothing_was_activated_after_a_real_execute_python_run(self) -> None:
+        # Meme correctif, miroir sur l'artefact de FIN de run (report.md,
+        # engine.py._render_report) : verifie ici sur un run qui a
+        # REELLEMENT execute execute_python (pas juste propose), confirme
+        # par le fichier ecrit sur disque.
+        contract = self._agentic_contract(allowed_paths=["preuve.txt"],
+                                          allowed_tools=["execute_python", "fetch_url", "run_declared_check"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "execute_python", "arguments": {"code": "open('preuve.txt', 'w').write('ok')"}},
+            {"tool_id": "run_declared_check", "arguments": {"check": "file_equals:preuve.txt:ok"}},
+        ]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        self.assertEqual(context.state, RunState.COMPLETED)
+        self.assertEqual((context.workspace / "preuve.txt").read_text(encoding="utf-8"), "ok")
+        report_md = (context.run_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("execute_python", report_md)
+        self.assertNotIn("Aucun shell, réseau, secret, MCP ou effet externe n’a été activé.", report_md,
+                         "report.md ne doit pas affirmer que rien n'a ete active apres un execute_python reel")
+
     def test_t80_write_workspace_draft_rejects_directory_collision_cleanly(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai : si la cible existe deja comme REPERTOIRE (collision avec
@@ -1651,9 +1688,18 @@ class HarnessTestCase(unittest.TestCase):
             self.engine.run_with_llm(contract, LlmPlanner(fake))
 
     def test_t34_execute_python_rejects_oversized_code(self) -> None:
+        # [MIS A JOUR 21/10/2026 -- le fixture etait un commentaire pur
+        # ("# " + padding), sans aucune instruction reelle -- depuis le
+        # nouveau controle "code vide ou sans instruction" de
+        # _syntax_errors() (bug reel trouve par un agent : ast.parse("")
+        # n'est pas une SyntaxError), ce code est desormais rejete comme
+        # VIDE avant meme d'atteindre le controle de taille (P-SIZE-002)
+        # que ce test veut exercer. Une vraie instruction (pass) devant le
+        # padding garde l'intention du test (le code n'est PAS vide, il
+        # est juste trop gros) sans changer la taille testee.
         contract = self._agentic_contract()
         fake = _FakeAdapter({"operations": [
-            {"tool_id": "execute_python", "arguments": {"code": "# " + "x" * 300_000}},
+            {"tool_id": "execute_python", "arguments": {"code": "pass  # " + "x" * 300_000}},
         ]})
         with self.assertRaises(PolicyDenied):
             self.engine.run_with_llm(contract, LlmPlanner(fake))
@@ -2924,6 +2970,73 @@ class SyntaxErrorsRetryCorrectionTests(unittest.TestCase):
         ])
         self.assertEqual(len(errors), 1)
         self.assertIn("RecursionError", errors[0])
+
+    def test_t114_syntax_errors_catches_empty_code_that_ast_parse_accepts_silently(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : ast.parse("") n'est PAS une SyntaxError -- une chaine vide
+        # (ou purement des commentaires/espaces) est un module Python
+        # valide sans aucune instruction. Avant ce correctif, _syntax_errors
+        # renvoyait [] pour ce code, ne declenchant jamais la relance --
+        # le code vide n'etait rattrape qu'INDIRECTEMENT, bien plus tard,
+        # par la regle "AGENTIC_EXECUTION exige un check declare".
+        from nxus_harness.llm_planner import LlmPlanner
+        for empty_code in ("", "   ", "# juste un commentaire\n# et un autre\n"):
+            errors = LlmPlanner._syntax_errors([
+                {"tool_id": "execute_python", "arguments": {"code": empty_code}},
+            ])
+            self.assertEqual(len(errors), 1, f"code {empty_code!r} devrait etre rejete comme vide")
+            self.assertIn("vide", errors[0])
+
+    def test_t114_syntax_errors_accepts_real_code_with_a_trailing_comment(self) -> None:
+        # Garde-fou de non-regression : un vrai code avec juste un
+        # commentaire ne doit pas etre pris pour du code vide.
+        from nxus_harness.llm_planner import LlmPlanner
+        errors = LlmPlanner._syntax_errors([
+            {"tool_id": "execute_python", "arguments": {"code": "x = 1  # commentaire"}},
+        ])
+        self.assertEqual(errors, [])
+
+    def test_t115_build_json_schema_respects_the_tools_own_required_list(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (inerte aujourd'hui car tous les outils actuels ont
+        # required == properties, mais pret a mordre) : _build_json_schema
+        # forcait TOUJOURS "required": list(properties) -- TOUTES les
+        # proprietes de l'outil -- sans jamais lire le "required" propre a
+        # l'outil dans le ToolRegistry. Un outil avec un argument
+        # reellement optionnel forcerait quand meme le modele a halluciner
+        # une valeur pour ce champ. Verifie ici avec un faux registre
+        # exposant un outil a argument optionnel, injecte sur une vraie
+        # instance LlmPlanner (seul self._registry est remplace, aucune
+        # autre methode mockee).
+        from nxus_harness.llm_planner import LlmPlanner
+        from nxus_harness.tools import ToolDefinition
+
+        class _FakeRegistry:
+            def get(self, tool_id):
+                return ToolDefinition(
+                    tool_id="tool_with_optional", version="1.0", owner="test", risk=RiskLevel.R0,
+                    schema={"required": ["mandatory"], "properties": {"mandatory": str, "optional": str},
+                           "additional": False},
+                    requires_approval=False,
+                )
+
+        planner = LlmPlanner.__new__(LlmPlanner)
+        planner._registry = _FakeRegistry()
+        schema = planner._build_json_schema(["tool_with_optional"])
+        inner_required = schema["properties"]["operations"]["items"]["oneOf"][0]["properties"]["arguments"]["required"]
+        self.assertEqual(inner_required, ["mandatory"],
+                         "seul le champ reellement requis par l'outil doit apparaitre dans 'required'")
+
+    def test_t115_build_json_schema_falls_back_to_all_properties_when_required_is_absent(self) -> None:
+        # Garde-fou de non-regression : les outils reels actuels ont tous
+        # required == properties (tout obligatoire) -- le comportement par
+        # defaut doit rester identique pour eux.
+        from nxus_harness.llm_planner import LlmPlanner
+        planner = LlmPlanner.__new__(LlmPlanner)
+        planner._registry = ToolRegistry()
+        schema = planner._build_json_schema(["write_workspace_draft"])
+        inner_required = schema["properties"]["operations"]["items"]["oneOf"][0]["properties"]["arguments"]["required"]
+        self.assertEqual(set(inner_required), {"path", "content"})
 
     def test_t76_retry_correction_message_neutralizes_chat_template_sequences(self) -> None:
         from nxus_harness.llm_planner import LlmPlanner

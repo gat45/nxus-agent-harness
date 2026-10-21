@@ -25,7 +25,7 @@
 
 ## Limites connues
 
-- Le sandboxing est **logique et applicatif** dans ce MVP : le runner n’utilise pas encore un conteneur/VM non-root avec cgroups, mount namespaces et egress filtré. Il n’exécute toutefois ni shell ni réseau.
+- Le sandboxing est **logique et applicatif** dans ce MVP : le runner n’utilise pas encore un conteneur/VM non-root avec cgroups, mount namespaces et egress filtré. [MIS A JOUR 21/10/2026 -- bug reel trouve par un agent puis verifie en vrai : cette ligne affirmait "il n'exécute toutefois ni shell ni réseau", devenu faux depuis l'ajout des connecteurs R2 (`execute_python`/`fetch_url`, section ci-dessous) et de `rea_inspect`/`smokinggun_scan` (`shell=True` sur Windows) -- cette même garantie, désormais fausse, s'était aussi propagée dans PLAN.md/report.md (corrigé séparément dans planner.py/engine.py).] `execute_python` exécute du code Python réel avec les mêmes privilèges OS que le harnais (aucune isolation de privilège — l'approbation exacte, liée au code littéral, est la vraie barrière) ; `fetch_url` fait de vraies requêtes réseau sous allowlist exacte + garde SSRF ; `rea_inspect`/`smokinggun_scan` passent par `shell=True` sur Windows (métacaractères filtrés, voir `policy.py`).
 - Le chaînage de hash ne remplace pas un stockage WORM, une signature d’opérateur ou un service d’audit externe.
 - Les regex de redaction ne constituent pas un DLP complet. Ne jamais injecter des secrets réels dans les fixtures ou le CLI.
 - Le modèle Ollama optionnel n’est pas un arbitre de sécurité. Toute sortie structurée reste validée localement et aucun tool call n’est exécuté automatiquement.

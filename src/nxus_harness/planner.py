@@ -85,7 +85,27 @@ class SimulatedPlanner:
             # sur operation.arguments avant le repr.
             safe_arguments = redact(operation.arguments)
             lines.append(f"- `{operation.tool_id}` : {safe_arguments} (R{int(operation.risk)}, vérification : {operation.verification})")
-        lines.extend(["", "## Risques et rollback", "- Aucun réseau, secret, shell ou action externe dans le MVP.", "- La seule écriture R1 est réversible : suppression du brouillon dans le workspace de run."])
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : cette ligne affirmait "Aucun reseau, secret, shell ou
+        # action externe" de maniere INCONDITIONNELLE, meme quand la liste
+        # d'operations juste au-dessus contient execute_python/fetch_url/
+        # rea_inspect/smokinggun_scan reels (R2/R1 avec acces reseau ou
+        # shell). C'est exactement le document que l'humain lit pour
+        # approuver (flux submit/approve) -- une garantie fausse ici est
+        # plus grave que la meme affirmation perimee dans un fichier de
+        # doc statique (docs/threat-model.md:28, deja corrige separement).
+        has_network_or_shell_capable_op = any(
+            operation.tool_id in {"execute_python", "fetch_url", "rea_inspect", "smokinggun_scan"}
+            for operation in operations
+        )
+        risk_line = (
+            "- Ce plan inclut des opérations réseau/exécution de code (voir la liste ci-dessus) : "
+            "aucune garantie d'absence de réseau ou de shell ne s'applique à ce run."
+            if has_network_or_shell_capable_op
+            else "- Aucun réseau, secret, shell ou action externe dans ce plan."
+        )
+        lines.extend(["", "## Risques et rollback", risk_line,
+                     "- La seule écriture R1 est réversible : suppression du brouillon dans le workspace de run."])
         return "\n".join(lines) + "\n"
 
 
