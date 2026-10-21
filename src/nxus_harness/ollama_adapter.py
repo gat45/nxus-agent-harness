@@ -7,11 +7,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from http.client import IncompleteRead
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import json
+import time
 
 from .models import ValidationError
+
+
+# [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en vrai
+# (serveur local jetable egouttant 1 octet a la fois) : le meme bug deja
+# corrige cote llama_cpp_adapter.py (timeout= passe a urlopen() n'est un
+# plafond que PAR OPERATION socket, pas sur la requete entiere -- il se
+# reinitialise a chaque recv() reussi) n'avait jamais ete reporte ici.
+# Un pair qui egoutte des octets tient la connexion ouverte indefiniment
+# pendant que response.read() accumule tout en memoire sans aucune limite
+# de taille ni de temps total. Meme plafond que le voisin llama.cpp.
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _read_capped(response: Any, *, max_bytes: int = _MAX_RESPONSE_BYTES, deadline_seconds: float) -> bytes:
+    deadline = time.monotonic() + deadline_seconds
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise ValidationError("réponse Ollama trop lente (délai total dépassé)")
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValidationError("réponse Ollama trop volumineuse")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @dataclass(frozen=True)
@@ -44,8 +74,22 @@ class OllamaAdapter:
         payload = json.dumps({"model": self.profile.model, "messages": messages, "stream": False, "format": schema}).encode("utf-8")
         request = Request(self.profile.base_url.rstrip("/") + "/api/chat", data=payload,
                           headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=self.profile.timeout_seconds) as response:  # nosec B310: loopback validated
-            raw = json.loads(response.read().decode("utf-8"))
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : ni la lecture (response.read()/_read_capped) ni le
+        # json.loads() de l'enveloppe EXTERNE n'etaient proteges, alors que
+        # le parse du contenu INTERNE (ci-dessous) l'est deja -- une
+        # reponse HTTP tronquee avec un Content-Length mensonger leve un
+        # http.client.IncompleteRead brut (qui n'herite ni d'OSError ni de
+        # ValueError) qui echappe a tout appelant filtrant sur ces types,
+        # et un corps non-JSON leve un JSONDecodeError brut au lieu du
+        # ValidationError propre que le reste de cette methode utilise
+        # deja pour toute sortie invalide.
+        try:
+            with urlopen(request, timeout=self.profile.timeout_seconds) as response:  # nosec B310: loopback validated
+                raw_bytes = _read_capped(response, deadline_seconds=self.profile.timeout_seconds)
+            raw = json.loads(raw_bytes.decode("utf-8"))
+        except (IncompleteRead, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValidationError("réponse Ollama invalide (enveloppe JSON illisible)") from exc
         content = raw.get("message", {}).get("content")
         if not isinstance(content, str):
             raise ValidationError("réponse Ollama sans contenu")

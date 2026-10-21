@@ -1920,6 +1920,114 @@ class LlamaCppAdapterSecurityTests(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 5.0)
 
 
+class OllamaAdapterUnboundedReadTests(unittest.TestCase):
+    """[AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : OllamaAdapter.structured_chat() faisait response.read() SANS
+    plafond de taille ni delai total -- meme classe de bug que
+    LlamaCppAdapterSecurityTests ci-dessus, mais le correctif (_read_capped)
+    n'avait jamais ete reporte sur l'adaptateur Ollama, qui restait exposé
+    via sa propre API publique documentee."""
+
+    def setUp(self) -> None:
+        import http.server
+        import threading as _threading
+
+        oversized_body = json.dumps({
+            "message": {"content": json.dumps({"operations": []}) + " " * (9 * 1024 * 1024)},
+        }).encode("utf-8")
+
+        class _OversizedHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(oversized_body)))
+                self.end_headers()
+                view = memoryview(oversized_body)
+                for offset in range(0, len(view), 65536):
+                    self.wfile.write(view[offset:offset + 65536])
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), _OversizedHandler)
+        self.port = self.server.server_address[1]
+        self.thread = _threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+
+    def test_t96_structured_chat_rejects_oversized_response_instead_of_buffering_it_whole(self) -> None:
+        from nxus_harness.ollama_adapter import OllamaAdapter, OllamaProfile as _OllamaProfile
+
+        adapter = OllamaAdapter(_OllamaProfile(
+            base_url=f"http://127.0.0.1:{self.port}", model="m", enabled=True, timeout_seconds=5,
+        ))
+        start = time.monotonic()
+        with self.assertRaises(ValidationError):
+            adapter.structured_chat([{"role": "user", "content": "x"}], schema={"required": []})
+        self.assertLess(time.monotonic() - start, 5.0)
+
+
+class AdapterTruncatedEnvelopeTests(unittest.TestCase):
+    """[AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : le json.loads() de l'enveloppe JSON EXTERNE (la reponse HTTP
+    elle-meme) n'etait protege par aucun try/except dans ni l'un ni
+    l'autre adaptateur, alors que le parse du contenu INTERNE l'est deja
+    -- une reponse HTTP tronquee avec un Content-Length mensonger levait
+    un http.client.IncompleteRead brut (n'herite ni d'OSError ni de
+    ValueError) au lieu du ValidationError propre attendu."""
+
+    def setUp(self) -> None:
+        import http.server
+        import threading as _threading
+
+        full_body = json.dumps({"message": {"content": json.dumps({"operations": []})},
+                                "choices": [{"message": {"content": json.dumps({"operations": []})}}]}).encode("utf-8")
+        truncated_body = full_body[: len(full_body) // 2]
+
+        class _TruncatingHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                # Content-Length mensonger : annonce le corps complet mais
+                # n'en ecrit que la moitie avant de fermer la connexion.
+                self.send_header("Content-Length", str(len(full_body)))
+                self.end_headers()
+                self.wfile.write(truncated_body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), _TruncatingHandler)
+        self.port = self.server.server_address[1]
+        self.thread = _threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+
+    def test_t97_llama_cpp_structured_chat_raises_validation_error_on_truncated_envelope(self) -> None:
+        from nxus_harness.llama_cpp_adapter import LlamaCppAdapter, LlamaCppProfile
+
+        adapter = LlamaCppAdapter(LlamaCppProfile(
+            base_url=f"http://127.0.0.1:{self.port}", model="m", enabled=True, timeout_seconds=5,
+        ))
+        with self.assertRaises(ValidationError):
+            adapter.structured_chat([{"role": "user", "content": "x"}], schema={"required": []})
+
+    def test_t97_ollama_structured_chat_raises_validation_error_on_truncated_envelope(self) -> None:
+        from nxus_harness.ollama_adapter import OllamaAdapter, OllamaProfile as _OllamaProfile
+
+        adapter = OllamaAdapter(_OllamaProfile(
+            base_url=f"http://127.0.0.1:{self.port}", model="m", enabled=True, timeout_seconds=5,
+        ))
+        with self.assertRaises(ValidationError):
+            adapter.structured_chat([{"role": "user", "content": "x"}], schema={"required": []})
+
+
 class AuditLogConcurrencyTests(unittest.TestCase):
     """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
     vrai : deux instances AuditLog reelles pointant sur le meme fichier

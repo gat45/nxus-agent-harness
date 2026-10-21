@@ -16,6 +16,7 @@ harness, jamais dans l'adaptateur).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from http.client import IncompleteRead
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -253,9 +254,22 @@ class LlamaCppAdapter:
         }).encode("utf-8")
         request = Request(self.profile.base_url.rstrip("/") + "/v1/chat/completions", data=payload,
                           headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=self.profile.timeout_seconds) as response:  # nosec B310: loopback validated
-            raw_bytes = _read_capped(response, deadline_seconds=self.profile.timeout_seconds)
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : ni la lecture (_read_capped) ni le json.loads() de
+        # l'enveloppe EXTERNE n'etaient proteges, alors que le parse du
+        # contenu INTERNE (plus bas) l'est deja -- une reponse HTTP
+        # tronquee avec un Content-Length mensonger leve un
+        # http.client.IncompleteRead brut (qui n'herite ni d'OSError ni de
+        # ValueError) qui echappe a tout appelant filtrant sur ces types,
+        # et un corps non-JSON leve un JSONDecodeError brut au lieu du
+        # ValidationError propre que le reste de cette methode utilise
+        # deja pour toute sortie invalide.
+        try:
+            with urlopen(request, timeout=self.profile.timeout_seconds) as response:  # nosec B310: loopback validated
+                raw_bytes = _read_capped(response, deadline_seconds=self.profile.timeout_seconds)
             raw = json.loads(raw_bytes.decode("utf-8"))
+        except (IncompleteRead, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValidationError("réponse llama.cpp invalide (enveloppe JSON illisible)") from exc
         # [AJOUTÉ 18/10/2026 — demandé : afficher les tokens/s] llama-server
         # renvoie ses propres mesures de débit dans "timings" à chaque
         # réponse (predicted_per_second = tokens/s de génération réels,
