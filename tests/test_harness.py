@@ -3234,6 +3234,98 @@ class MemoryRecordRunBestEffortTests(unittest.TestCase):
         live_grants = [g for g in approvals_data_after_retry if not g["consumed"]]
         self.assertEqual(len(live_grants), len(grants), "un seul jeu de grants vivants doit exister apres le retry")
 
+    def test_t107_transition_treats_audit_append_failure_as_best_effort_after_persist_succeeds(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (audit d'integration cross-fichiers) : _transition() ecrit
+        # d'abord state.json (atomique, _persist_state()), PUIS seulement
+        # append() dans audit.jsonl -- deux ecritures disque separees sous
+        # deux verrous differents. Si _persist_state() reussit mais que cet
+        # append() echoue (disque plein, ou timeout du verrou
+        # audit.jsonl.lock), state.json est DEJA passe durablement a
+        # APPROVED alors que l'ancien code remontait quand meme l'echec --
+        # le except Exception d'approve() (b00f540) revoquait alors les
+        # grants tout juste emis pour une transition qui avait REELLEMENT
+        # reussi, strandant le run pour toujours (plus AWAITING_APPROVAL
+        # pour re-approuver, plus aucun grant vivant pour executer).
+        from nxus_harness import audit as audit_module
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.create_run(contract)
+        self.engine.plan(context)
+
+        original_append = audit_module.AuditLog.append
+
+        def failing_append(self, component, action, decision, details=None):
+            if action == "approve":
+                raise OSError("disque plein (simulé) pendant l'écriture de l'audit")
+            return original_append(self, component, action, decision, details)
+
+        audit_module.AuditLog.append = failing_append
+        try:
+            grants = self.engine.approve(context, actor_id=contract.actor_id)  # ne doit PAS lever
+        finally:
+            audit_module.AuditLog.append = original_append
+
+        self.assertTrue(grants, "approve() doit reussir et renvoyer ses grants malgre l'echec de l'audit")
+        state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state_on_disk, "APPROVED", "la transition a reellement reussi (state.json en fait foi)")
+        approvals_data = json.loads((context.run_dir / "approvals.json").read_text(encoding="utf-8"))
+        self.assertFalse(all(grant["consumed"] for grant in approvals_data),
+                         "le grant d'une transition reellement reussie ne doit pas etre revoque")
+
+    def test_t108_execute_does_not_mask_a_real_tool_failure_with_an_audit_append_error(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (meme audit d'integration que test_t107, deuxieme
+        # consequence) : execute() rattrape un vrai echec d'outil via
+        # `except Exception as exc: self._transition(..., BLOCKED,
+        # "execution_blocked", {"error": str(exc)}); raise` -- le `raise`
+        # nu relance exc (la vraie cause), SAUF si _transition() elle-meme
+        # levait a cause de l'echec de audit.append() : cette NOUVELLE
+        # exception (OSError derivee) remontait alors a la place,
+        # masquant completement la vraie cause metier du blocage.
+        from nxus_harness import audit as audit_module, tools as tools_module
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.create_run(contract)
+        self.engine.plan(context)
+        grants = self.engine.approve(context, actor_id=contract.actor_id)
+
+        original_invoke = tools_module.ToolGateway.invoke
+
+        def failing_invoke(self, *args, **kwargs):
+            raise RuntimeError("échec réel d'outil simulé")
+
+        original_append = audit_module.AuditLog.append
+
+        def failing_append(self, component, action, decision, details=None):
+            if action == "execution_blocked":
+                raise OSError("disque plein (simulé) pendant l'écriture de l'audit")
+            return original_append(self, component, action, decision, details)
+
+        tools_module.ToolGateway.invoke = failing_invoke
+        audit_module.AuditLog.append = failing_append
+        try:
+            with self.assertRaises(RuntimeError):
+                self.engine.execute(context, grants)
+        finally:
+            tools_module.ToolGateway.invoke = original_invoke
+            audit_module.AuditLog.append = original_append
+
+        state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state_on_disk, "BLOCKED")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

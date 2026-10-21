@@ -514,7 +514,40 @@ class HarnessEngine:
         source = context.state
         context.state = target
         self._persist_state(context)
-        context.audit.append("state_machine", action, "allow", {"from": source.value, "to": target.value, **(details or {})})
+        try:
+            context.audit.append("state_machine", action, "allow", {"from": source.value, "to": target.value, **(details or {})})
+        except (OSError, ValidationError):
+            # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai, meme classe que tous les correctifs
+            # precedents de cette famille (f91908c, 753623e, f1fab14,
+            # b00f540) mais ICI au coeur meme de _transition(), partagee
+            # par TOUS les appelants : _persist_state() ci-dessus a DEJA
+            # reussi (ecriture atomique, state.json reflete durablement
+            # cette transition) quand cet append() echoue (disque plein,
+            # ou timeout du verrou audit.jsonl.lock -> ValidationError).
+            # Avant ce correctif, laisser cette exception remonter cassait
+            # deux appelants differemment :
+            #  - approve() : son except Exception revoquait les grants
+            #    tout juste emis et relevait -- alors que state.json etait
+            #    DEJA passe a APPROVED. Le run restait stranded pour
+            #    toujours (plus AWAITING_APPROVAL pour re-approuver, plus
+            #    aucun grant vivant pour executer), sans AUCUNE trace
+            #    d'audit expliquant pourquoi.
+            #  - execute() : son except Exception appelle _transition(...,
+            #    BLOCKED, "execution_blocked", ...) puis `raise` (qui
+            #    relance l'exception ORIGINALE, la vraie cause metier du
+            #    blocage) -- mais si CET appel a _transition() levait a son
+            #    tour (a cause de cet append()), c'est cette NOUVELLE
+            #    exception (OSError derivee) qui remontait a l'appelant,
+            #    masquant completement la vraie cause (ex. RuntimeError
+            #    d'un outil qui a reellement echoue).
+            # L'entree d'audit est une trace DERIVEE d'une transition DEJA
+            # reelle (meme raisonnement que verification.json/
+            # memory.record_run()/_write_progress() ailleurs dans ce
+            # fichier) -- jamais la laisser transformer un succes reel (ou
+            # la vraie cause d'un echec reel) en echec different remonte a
+            # l'appelant.
+            pass
 
     @staticmethod
     def _require_state(context: RunContext, expected: RunState) -> None:
