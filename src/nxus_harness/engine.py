@@ -344,11 +344,25 @@ class HarnessEngine:
         # deux consommateurs (verification.json ci-dessous, report.md via
         # _render_report plus bas) plutot que duplique a chaque site.
         results = [replace(result, details=redact(result.details), evidence=redact(result.evidence)) for result in results]
-        (context.run_dir / "verification.json").write_text(json.dumps([result.to_dict() for result in results], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self._transition(context, RunState.SECURITY_GATE, "security_gate", {"checks": [item.status.value for item in results]})
         allowed_statuses = {CheckStatus.PASS, CheckStatus.NOT_APPLICABLE}
         target = RunState.COMPLETED if all(item.status in allowed_statuses for item in results) else RunState.FAILED
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (echec force de _persist_state() entre les deux transitions,
+        # run reel create_run->plan->approve->execute) : verification.json
+        # etait ecrit AVANT ces deux _transition(), donc si _persist_state()
+        # echoue (disque plein, permissions) pendant la transition finale,
+        # verification.json reste sur disque en affichant TOUS LES CHECKS
+        # EN PASS alors que state.json reste bloque a SECURITY_GATE --
+        # jamais COMPLETED. Un lecteur de verification.json seul (tableau
+        # de bord, humain) croirait le run reussi ; verify_and_complete()
+        # exige RunState.VERIFYING pour redemarrer (_require_state), donc
+        # un run ainsi coince ne peut plus jamais etre relance. Ecrit
+        # maintenant APRES que la transition finale ait reellement reussi :
+        # si _persist_state() echoue, aucun verification.json n'existe du
+        # tout plutot qu'un qui affiche faussement un succes complet.
         self._transition(context, target, "complete", {"final_status": target.value})
+        (context.run_dir / "verification.json").write_text(json.dumps([result.to_dict() for result in results], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self._render_report(context, results)
         # [AJOUTÉ 18/10/2026 — mémoire inter-run] Écrit APRÈS la transition
         # finale : l'entrée reflète toujours un état déjà validé par ce même

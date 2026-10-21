@@ -2547,5 +2547,64 @@ class ExternalToolMissingBinaryTests(unittest.TestCase):
         self.assertEqual(policy_denials[0]["details"]["rule"], "P-EXEC-001")
 
 
+class VerificationJsonOrderingTests(unittest.TestCase):
+    """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai (echec force de _persist_state() entre les deux transitions de
+    verify_and_complete(), run reel create_run->plan->approve->execute) :
+    verification.json etait ecrit AVANT les transitions SECURITY_GATE/
+    COMPLETED -- si _persist_state() echoue pendant la transition finale
+    (disque plein, permissions), verification.json restait sur disque en
+    affichant TOUS LES CHECKS EN PASS alors que state.json restait bloque
+    a SECURITY_GATE, jamais COMPLETED. Un lecteur de verification.json
+    seul croirait le run reussi ; le run devenait aussi impossible a
+    relancer (verify_and_complete exige RunState.VERIFYING)."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "fixtures").mkdir()
+        shutil.copy(Path(__file__).resolve().parents[1] / "fixtures" / "corpus.md", self.root / "fixtures" / "corpus.md")
+        self.engine = HarnessEngine(self.root)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_t89_verification_json_is_never_written_when_the_final_transition_fails(self) -> None:
+        from nxus_harness import engine as engine_module
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.create_run(contract)
+        self.engine.plan(context)
+        grants = self.engine.approve(context, actor_id=contract.actor_id)
+        self.engine.execute(context, grants)
+
+        original_persist_state = engine_module.HarnessEngine._persist_state
+        calls = {"n": 0}
+
+        def failing_persist_state(ctx):
+            calls["n"] += 1
+            if calls["n"] == 2:  # la transition SECURITY_GATE (1ere) reussit, la transition finale (2e) echoue
+                raise OSError("disque plein (simule)")
+            return original_persist_state(ctx)
+
+        engine_module.HarnessEngine._persist_state = staticmethod(failing_persist_state)
+        try:
+            with self.assertRaises(OSError):
+                self.engine.verify_and_complete(context)
+        finally:
+            engine_module.HarnessEngine._persist_state = original_persist_state
+
+        self.assertFalse((context.run_dir / "verification.json").is_file(),
+                         "verification.json ne doit jamais exister si la transition finale a echoue")
+        state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state_on_disk, "SECURITY_GATE")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
