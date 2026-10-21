@@ -2364,6 +2364,164 @@ class ChatUiSecurityTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
 
 
+class ChatUiModelPickerTests(unittest.TestCase):
+    """[AJOUTE 21/10/2026 -- demande utilisateur : l'interface de chat_ui.py
+    doit permettre de choisir/changer de modele depuis la page plutot que de
+    l'imposer une fois pour toutes via --model au demarrage. Verifie de bout
+    en bout avec un vrai process chat_ui.py ET un faux serveur llama.cpp
+    jetable (http.server), sans aucun mock du code audite."""
+
+    def setUp(self) -> None:
+        import http.server
+        import threading as _threading
+
+        class _FakeLlamaServer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/v1/models":
+                    body = json.dumps({"data": [{"id": "model-a"}, {"id": "model-b"}]}).encode("utf-8")
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                incoming = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                requested_model = incoming.get("model", "")
+                body = json.dumps({"choices": [{"message": {"content": f"echo:{requested_model}"}}]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        self.fake_server = http.server.HTTPServer(("127.0.0.1", 0), _FakeLlamaServer)
+        self.fake_port = self.fake_server.server_address[1]
+        self.fake_thread = _threading.Thread(target=self.fake_server.serve_forever, daemon=True)
+        self.fake_thread.start()
+
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "chat_ui.py"
+        self.port = 8799
+        self.proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--model", "default-model", "--port", str(self.port),
+             "--base-url", f"http://127.0.0.1:{self.fake_port}"],
+            cwd=str(script_path.parents[1]),
+            env={**__import__("os").environ, "PYTHONPATH": str(script_path.parents[1] / "src")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
+
+    def tearDown(self) -> None:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+        self.fake_server.shutdown()
+        self.fake_thread.join(timeout=5)
+
+    def test_t103_api_models_lists_the_connected_servers_models(self) -> None:
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/models", timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(data["models"], ["model-a", "model-b"])
+        self.assertEqual(data["default"], "default-model")
+
+    def test_t104_chat_uses_the_model_selected_by_the_client_not_the_cli_default(self) -> None:
+        import urllib.request
+        payload = json.dumps({"messages": [{"role": "user", "content": "hi"}], "model": "model-b"}).encode("utf-8")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/chat", data=payload,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(data["content"], "echo:model-b")
+
+    def test_t105_chat_falls_back_to_the_cli_default_model_when_the_client_omits_one(self) -> None:
+        import urllib.request
+        payload = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode("utf-8")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/chat", data=payload,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(data["content"], "echo:default-model")
+
+
+class ChatUiUnboundedBackendReadTests(unittest.TestCase):
+    """[AJOUTE 21/10/2026 -- meme classe de bug deja corrigee dans
+    llama_cpp_adapter.py/ollama_adapter.py (commit eef1713), jamais reportee
+    a chat_ui.py : do_POST lisait la reponse de llama-server avec
+    response.read() brut -- aucun plafond de taille, et timeout= sur
+    urlopen() n'est qu'un delai PAR OPERATION socket (il se reinitialise a
+    chaque recv() reussi), pas un plafond sur la requete entiere. Un
+    serveur loopback buggy/compromis qui renvoie un corps enorme pouvait
+    etre lu en entier en memoire sans aucune limite."""
+
+    def setUp(self) -> None:
+        import http.server
+        import threading as _threading
+
+        oversized_body = json.dumps({
+            "choices": [{"message": {"content": "x" * (9 * 1024 * 1024)}}],
+        }).encode("utf-8")
+
+        class _OversizedLlamaServer(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(oversized_body)))
+                self.end_headers()
+                view = memoryview(oversized_body)
+                for offset in range(0, len(view), 65536):
+                    self.wfile.write(view[offset:offset + 65536])
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        self.fake_server = http.server.HTTPServer(("127.0.0.1", 0), _OversizedLlamaServer)
+        self.fake_port = self.fake_server.server_address[1]
+        self.fake_thread = _threading.Thread(target=self.fake_server.serve_forever, daemon=True)
+        self.fake_thread.start()
+
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "chat_ui.py"
+        self.port = 8800
+        self.proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--model", "m", "--port", str(self.port),
+             "--base-url", f"http://127.0.0.1:{self.fake_port}"],
+            cwd=str(script_path.parents[1]),
+            env={**__import__("os").environ, "PYTHONPATH": str(script_path.parents[1] / "src")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
+
+    def tearDown(self) -> None:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+        self.fake_server.shutdown()
+        self.fake_thread.join(timeout=5)
+
+    def test_t106_chat_rejects_an_oversized_backend_response_instead_of_buffering_it_whole(self) -> None:
+        import urllib.request
+        payload = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode("utf-8")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/chat", data=payload,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        start = time.monotonic()
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertIn("error", data)
+        self.assertLess(time.monotonic() - start, 5.0)
+
+
 class ViewRunsLiveErrorSurfacingTests(unittest.TestCase):
     """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
     vrai : _render_live() (view_runs.py) ignorait completement
