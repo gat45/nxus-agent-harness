@@ -44,11 +44,33 @@ pour `rea_inspect`/`smokinggun_scan`).
 
 Tests : `PYTHONPATH=src py -m pytest tests/test_harness.py -q`.
 
+## Registre d'outils étendu (2026-10-21)
+
+Sur demande, le registre a été élargi à quatre nouveaux outils, tous sous
+le MÊME modèle d'approbation que les outils existants (R1/R2, approbation
+exacte obligatoire, `PolicyEngine.authorize()` fail-closed, audit chaîné)
+— le modèle de confiance n'a pas changé, seul le registre a grandi :
+
+- `capture_screen` (R1) — capture l'écran de l'opérateur via PowerShell/
+  .NET (zéro dépendance ajoutée), chemin de sortie sous la même allowlist
+  que `write_workspace_draft`.
+- `read_external_file` (R1) — lecture hors workspace, allowlist EXACTE
+  dédiée (`allowed_read_paths`, contrat ET manifeste), même principe que
+  `allowed_urls` pour `fetch_url`.
+- `mcp_call` (R2) — pont vers UN serveur MCP configuré côté serveur
+  uniquement (jamais par le modèle), allowlist exacte des noms d'outils
+  MCP (`allowed_mcp_tools`).
+- `browser_render_page` (R2) — rendu JS réel via un navigateur Chromium
+  headless (msedge/chrome déjà installés, zéro dépendance), partage
+  l'allowlist et la garde SSRF de `fetch_url`.
+
+Voir commits `3e58947`, `987fc29`, `5462e3f`, `77de2ad`.
+
 ## État de la campagne d'audit (2026-10-21)
 
 22 bugs réels trouvés et corrigés à ce jour, chacun avec un test de
 régression vérifié (échoue sans le correctif, confirmé par retrait
-temporaire). 145 tests. Classes de bugs dominantes rencontrées plusieurs
+temporaire). 152 tests. Classes de bugs dominantes rencontrées plusieurs
 fois — `nxus-bug-hunter` les connaît déjà, voir sa définition pour le
 détail :
 
