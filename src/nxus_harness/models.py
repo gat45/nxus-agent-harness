@@ -194,6 +194,13 @@ class TaskContract:
     # ICI (et dans manifest.allowed_read_paths, même double vérification
     # que allowed_urls) tel quel.
     allowed_read_paths: list[str] = field(default_factory=list)
+    # [AJOUTÉ 21/10/2026 — demandé : pont MCP] Allowlist EXACTE de NOMS
+    # d'outils MCP (pas d'URL de serveur -- celle-ci est configurée côté
+    # serveur uniquement, voir ToolGateway.mcp_base_url) que mcp_call peut
+    # invoquer. Un serveur MCP peut exposer des dizaines d'outils ; cette
+    # liste restreint ce qu'un run précis peut réellement appeler, même
+    # principe que allowed_tools pour le registre du harnais lui-même.
+    allowed_mcp_tools: list[str] = field(default_factory=list)
     data_classification: str = "synthetic"
     budget_seconds: int = 60
     desired_draft: str = DEFAULT_DESIRED_DRAFT
@@ -226,6 +233,7 @@ class TaskContract:
                 allowed_tools=list(value.get("allowed_tools", [])),
                 allowed_urls=list(value.get("allowed_urls", [])),
                 allowed_read_paths=list(value.get("allowed_read_paths", [])),
+                allowed_mcp_tools=list(value.get("allowed_mcp_tools", [])),
                 data_classification=value.get("data_classification", "synthetic"),
                 budget_seconds=int(value.get("budget_seconds", 60)),
                 desired_draft=value.get("desired_draft", DEFAULT_DESIRED_DRAFT),
@@ -278,12 +286,15 @@ class PlanManifest:
     # [AJOUTÉ 21/10/2026 — voir TaskContract.allowed_read_paths] même
     # double vérification pour read_external_file.
     allowed_read_paths: list[str] = field(default_factory=list)
+    # [AJOUTÉ 21/10/2026 — voir TaskContract.allowed_mcp_tools] même double
+    # vérification pour mcp_call.
+    allowed_mcp_tools: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id, "task_id": self.task_id, "base_snapshot": self.base_snapshot,
             "allowed_paths": self.allowed_paths, "allowed_urls": self.allowed_urls,
-            "allowed_read_paths": self.allowed_read_paths,
+            "allowed_read_paths": self.allowed_read_paths, "allowed_mcp_tools": self.allowed_mcp_tools,
             "operations": [operation.to_dict() for operation in self.operations],
             "created_at": self.created_at, "expires_at": self.expires_at, "plan_hash": self.plan_hash,
         }
@@ -298,6 +309,7 @@ class PlanManifest:
             run_id=value["run_id"], task_id=value["task_id"], base_snapshot=value["base_snapshot"],
             allowed_paths=list(value["allowed_paths"]), allowed_urls=list(value.get("allowed_urls", [])),
             allowed_read_paths=list(value.get("allowed_read_paths", [])),
+            allowed_mcp_tools=list(value.get("allowed_mcp_tools", [])),
             operations=[PlannedOperation.from_dict(item) for item in value["operations"]],
             created_at=value["created_at"], expires_at=value["expires_at"], plan_hash=value["plan_hash"],
         )

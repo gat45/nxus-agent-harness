@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 import threading
 import ipaddress
+import json
 import socket
 
 from .models import (PlanManifest, PolicyDenied, RiskLevel, RunState, TaskContract, TaskProfile, ValidationError,
@@ -97,6 +98,8 @@ _OWASP_LLM_RISK = {
     "P-PATH-003": "LLM05:2025 Improper Output Handling",
     "P-SCREEN-001": "LLM05:2025 Improper Output Handling",
     "P-READ-001": "LLM05:2025 Improper Output Handling",
+    "P-MCP-001": "LLM06:2025 Excessive Agency",
+    "P-MCP-002": "LLM06:2025 Excessive Agency",
     "P-URL-001": "LLM05:2025 Improper Output Handling",
     "P-URL-002": "LLM05:2025 Improper Output Handling",
 }
@@ -145,7 +148,7 @@ class PolicyEngine:
         TaskProfile.AGENTIC_EXECUTION: {"read_fixture", "retrieve_fixture", "write_workspace_draft",
                                        "run_declared_check", "execute_python", "fetch_url",
                                        "request_rea_analysis", "rea_inspect", "smokinggun_scan", "jacobian_verify",
-                                       "capture_screen", "read_external_file"},
+                                       "capture_screen", "read_external_file", "mcp_call"},
     }
 
     def __init__(self) -> None:
@@ -284,6 +287,25 @@ class PolicyEngine:
             raw_path = arguments.get("path", "")
             if not raw_path or raw_path not in manifest.allowed_read_paths or raw_path not in contract.allowed_read_paths:
                 return PolicyDecision("deny", "P-READ-001", "chemin hors périmètre de lecture autorisé")
+        if tool_id == "mcp_call":
+            # [AJOUTÉ 21/10/2026 — pont MCP] Même principe que rea_inspect
+            # (allowlist de sous-commandes) : le nom de l'outil MCP doit
+            # être EXACTEMENT dans contract.allowed_mcp_tools ET
+            # manifest.allowed_mcp_tools -- jamais un wildcard, jamais
+            # "tout ce que le serveur expose". arguments_json est une
+            # chaîne, pas un objet : P-MANIFEST-001 (plus haut dans cette
+            # méthode) garantit déjà qu'elle correspond EXACTEMENT à ce qui
+            # a été approuvé (comme pour args_json de jacobian_verify) ;
+            # P-MCP-002 refuse seulement un JSON manifestement invalide
+            # avant de perdre un grant sur un appel qui échouerait de toute
+            # façon côté serveur MCP.
+            tool_name = arguments.get("tool_name", "")
+            if not tool_name or tool_name not in manifest.allowed_mcp_tools or tool_name not in contract.allowed_mcp_tools:
+                return PolicyDecision("deny", "P-MCP-001", "outil MCP hors périmètre autorisé")
+            try:
+                json.loads(arguments.get("arguments_json", ""))
+            except (json.JSONDecodeError, TypeError):
+                return PolicyDecision("deny", "P-MCP-002", "arguments_json invalide")
         if tool_id == "rea_inspect":
             # [AJOUTÉ 18/10/2026 — pont vers la VRAIE CLI rea (morluto/rea)]
             # rea a des dizaines de sous-commandes, certaines destructrices

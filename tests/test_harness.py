@@ -1037,6 +1037,66 @@ class HarnessTestCase(unittest.TestCase):
         with self.assertRaises(PolicyDenied):
             self.engine.run_with_llm(contract, LlmPlanner(fake))
 
+    def test_t119_mcp_call_invokes_a_real_mcp_server_and_returns_its_result(self) -> None:
+        # [AJOUTE 21/10/2026 -- nouvel outil, demande : pont MCP sous le
+        # meme modele d'approbation exacte. Verifie l'appel complet contre
+        # un VRAI serveur HTTP jetable qui parle JSON-RPC 2.0 (methode
+        # "tools/call", forme reelle du protocole MCP), pas un mock du
+        # ToolGateway audite.
+        import http.server
+        import json as _json
+        import threading as _threading
+
+        received = {}
+
+        class _FakeMcpServer(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                request = _json.loads(self.rfile.read(length).decode("utf-8"))
+                received["request"] = request
+                body = _json.dumps({"jsonrpc": "2.0", "id": request["id"],
+                                    "result": {"content": [{"type": "text", "text": "mcp-ok"}]}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _FakeMcpServer)
+        port = server.server_address[1]
+        thread = _threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            engine = HarnessEngine(self.root, mcp_base_url=f"http://127.0.0.1:{port}/mcp")
+            contract = self._agentic_contract(allowed_tools=["mcp_call"], allowed_mcp_tools=["search_docs"])
+            fake = _FakeAdapter({"operations": [
+                {"tool_id": "mcp_call", "arguments": {"tool_name": "search_docs", "arguments_json": '{"query": "x"}'}},
+            ]})
+            context = engine.run_with_llm(contract, LlmPlanner(fake))
+            result = context.results[0]["result"]
+            self.assertEqual(result["result"]["content"][0]["text"], "mcp-ok")
+            self.assertTrue(result["untrusted"])
+            self.assertEqual(received["request"]["params"]["name"], "search_docs")
+            self.assertEqual(received["request"]["params"]["arguments"], {"query": "x"})
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_t119_mcp_call_rejects_a_tool_name_outside_the_allowlist(self) -> None:
+        # Garde-fou de non-regression : un nom d'outil MCP absent de
+        # allowed_mcp_tools doit etre refuse par policy.authorize(), meme
+        # si un serveur MCP est configure et l'exposerait reellement.
+        contract = self._agentic_contract(allowed_tools=["mcp_call"], allowed_mcp_tools=[])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "mcp_call", "arguments": {"tool_name": "dangerous_tool", "arguments_json": "{}"}},
+        ]})
+        engine = HarnessEngine(self.root, mcp_base_url="http://127.0.0.1:1/unused")
+        with self.assertRaises(PolicyDenied):
+            engine.run_with_llm(contract, LlmPlanner(fake))
+
     def test_t23_execute_python_runs_for_real_inside_workspace(self) -> None:
         # [AJOUTÉ 18/10/2026 — R2] Preuve que "exécuter du code" n'est pas
         # juste accepté par le policy engine mais tourne VRAIMENT : le script

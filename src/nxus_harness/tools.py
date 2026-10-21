@@ -410,6 +410,16 @@ class ToolRegistry:
             # jamais un répertoire, jamais un wildcard.
             "read_external_file": ToolDefinition("read_external_file", "1.0", "harness", RiskLevel.R1,
                 {"required": ["path"], "properties": {"path": str}, "additional": False}, True),
+            # [AJOUTÉ 21/10/2026 — demandé : pont MCP, sous le même modèle
+            # d'approbation exacte. R2 comme execute_python/fetch_url : un
+            # outil MCP peut avoir des effets de bord inconnus du harnais
+            # (c'est un serveur tiers). arguments_json est une chaîne JSON
+            # (comme jacobian_verify.args_json) plutôt qu'un objet imbriqué,
+            # pour garder le schéma/la grammaire GBNF simple -- le serveur
+            # MCP valide lui-même la forme de ses propres arguments.
+            "mcp_call": ToolDefinition("mcp_call", "1.0", "harness", RiskLevel.R2,
+                {"required": ["tool_name", "arguments_json"],
+                "properties": {"tool_name": str, "arguments_json": str}, "additional": False}, True),
         }
 
     def get(self, tool_id: str) -> ToolDefinition:
@@ -439,7 +449,7 @@ class ToolRegistry:
 class ToolGateway:
     def __init__(self, *, workspace: Path, fixtures: Path, registry: ToolRegistry,
                  policy: PolicyEngine, approvals: ApprovalService, audit: AuditLog,
-                 evidence: EvidenceStore | None = None) -> None:
+                 evidence: EvidenceStore | None = None, mcp_base_url: str | None = None) -> None:
         self.workspace = workspace.resolve()
         self.fixtures = fixtures.resolve()
         self.registry = registry
@@ -451,6 +461,14 @@ class ToolGateway:
         # evidence, retrieve_fixture renvoie ses correspondances mais ne crée
         # plus de provenance tracée — RAG réel, piège possible si on l'omet.
         self.evidence = evidence
+        # [AJOUTÉ 21/10/2026 — demandé : pont MCP] Configuré CÔTÉ SERVEUR
+        # uniquement (ici, comme self.fixtures) -- jamais pris depuis le
+        # contrat ou une opération proposée par le modèle, même logique que
+        # self.fixtures déjà. None = mcp_call désactivé (comportement
+        # inchangé par défaut). Un seul serveur MCP whitelisté par run ; le
+        # modèle choisit un tool_name/des arguments PARMI ceux déjà exposés
+        # par ce serveur, jamais l'URL du serveur lui-même.
+        self.mcp_base_url = mcp_base_url
         self.workspace.mkdir(parents=True, exist_ok=True)
 
     def invoke(self, *, contract: TaskContract, manifest: PlanManifest, state: RunState,
@@ -878,6 +896,39 @@ class ToolGateway:
                        "truncated": target.stat().st_size > 1_000_000, "untrusted": True}
             except OSError as exc:
                 return {"path": arguments["path"], "error": str(exc), "untrusted": True}
+        if tool_id == "mcp_call":
+            # [AJOUTÉ 21/10/2026 — demandé : pont MCP] self.mcp_base_url est
+            # configuré CÔTÉ SERVEUR uniquement (voir __init__) -- jamais
+            # pris du contrat ni d'une opération. policy.py a déjà validé
+            # (P-MCP-001) que tool_name figure dans l'allowlist exacte des
+            # deux côtés. Requête JSON-RPC 2.0 minimale (méthode
+            # "tools/call", voir la spec MCP) via urllib, même plafond de
+            # taille que fetch_url (1 Mo) -- aucune dépendance ajoutée.
+            from urllib.request import Request, urlopen
+            if not self.mcp_base_url:
+                raise PolicyDenied("aucun serveur MCP configuré côté harnais")
+            try:
+                mcp_arguments = json.loads(arguments["arguments_json"])
+            except json.JSONDecodeError as exc:
+                return {"tool_name": arguments["tool_name"], "error": f"arguments_json invalide : {exc}", "untrusted": True}
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": arguments["tool_name"], "arguments": mcp_arguments},
+            }).encode("utf-8")
+            request = Request(self.mcp_base_url.rstrip("/"), data=payload,
+                              headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urlopen(request, timeout=30) as response:  # nosec B310: serveur MCP whitelisté côté harnais, jamais pris du modèle
+                    raw = response.read(1_000_000)
+            except Exception as exc:
+                return {"tool_name": arguments["tool_name"], "error": str(exc), "untrusted": True}
+            try:
+                rpc_response = json.loads(raw.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError as exc:
+                return {"tool_name": arguments["tool_name"], "error": f"réponse MCP invalide : {exc}", "untrusted": True}
+            if "error" in rpc_response:
+                return {"tool_name": arguments["tool_name"], "error": str(rpc_response["error"]), "untrusted": True}
+            return {"tool_name": arguments["tool_name"], "result": rpc_response.get("result"), "untrusted": True}
         if tool_id == "request_rea_analysis":
             # [AJOUTÉ 18/10/2026] Relais ASYNCHRONE : n'exécute rien, écrit
             # juste la demande pour qu'un humain/Claude la traite hors de ce

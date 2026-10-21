@@ -32,7 +32,7 @@ class SimulatedPlanner:
         return PlanManifest(
             run_id=run_id, task_id=contract.task_id, base_snapshot=content_hash("empty-workspace"),
             allowed_paths=contract.allowed_paths, allowed_urls=contract.allowed_urls,
-            allowed_read_paths=contract.allowed_read_paths,
+            allowed_read_paths=contract.allowed_read_paths, allowed_mcp_tools=contract.allowed_mcp_tools,
             operations=operations, created_at=now.isoformat(),
             expires_at=(now + timedelta(minutes=15)).isoformat(), plan_hash=content_hash(plan),
         )

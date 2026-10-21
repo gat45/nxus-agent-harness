@@ -80,11 +80,15 @@ class RunContext:
 
 
 class HarnessEngine:
-    def __init__(self, project_root: Path) -> None:
+    def __init__(self, project_root: Path, *, mcp_base_url: str | None = None) -> None:
         self.project_root = project_root.resolve()
         self.runs_root = self.project_root / "runs"
         self.fixtures = self.project_root / "fixtures"
         self.memory = MemoryStore(self.project_root / "memory")
+        # [AJOUTÉ 21/10/2026 — demandé : pont MCP] Configuré CÔTÉ SERVEUR au
+        # démarrage du harnais, jamais par le contrat ni par le modèle --
+        # voir ToolGateway.mcp_base_url, où ce champ atterrit réellement.
+        self.mcp_base_url = mcp_base_url
         self.runs_root.mkdir(parents=True, exist_ok=True)
 
     def create_run(self, contract: TaskContract) -> RunContext:
@@ -295,7 +299,7 @@ class HarnessEngine:
         self._transition(context, RunState.EXECUTING, "start_execution")
         gateway = ToolGateway(workspace=context.workspace, fixtures=self.fixtures, registry=ToolRegistry(),
                               policy=context.policy, approvals=context.approvals, audit=context.audit,
-                              evidence=context.evidence)
+                              evidence=context.evidence, mcp_base_url=self.mcp_base_url)
         results: list[dict[str, Any]] = []
         grant_iter = iter(grants)
         try:
