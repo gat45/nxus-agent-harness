@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Any, Callable
 import ctypes
+import hashlib
 import json
 import os
 import subprocess
@@ -388,6 +389,20 @@ class ToolRegistry:
             # par jacobian lui-même avant tout calcul.
             "jacobian_verify": ToolDefinition("jacobian_verify", "1.0", "harness", RiskLevel.R0,
                 {"required": ["operation_id", "args_json"], "properties": {"operation_id": str, "args_json": str}, "additional": False}, False),
+            # [AJOUTÉ 21/10/2026 — demandé : élargir le registre tout en
+            # gardant l'approbation exacte obligatoire (voir threat-model.md
+            # pour le principe). Capture l'écran de l'OPÉRATEUR (pas une
+            # cible du workspace) -- risque de divulgation plus large qu'un
+            # read_fixture ordinaire (autres fenêtres, informations
+            # sensibles potentiellement visibles), donc R1 avec approbation
+            # requise comme write_workspace_draft, même si c'est
+            # techniquement une "lecture" : le chemin de sortie suit EXACTEMENT
+            # la même allowlist (P-SCREEN-001, policy.py) que
+            # write_workspace_draft (P-PATH-001/002/003), et passe par le
+            # même contrôle "scope" de verify_and_complete() (tout fichier
+            # écrit dans le workspace doit être dans allowed_paths).
+            "capture_screen": ToolDefinition("capture_screen", "1.0", "harness", RiskLevel.R1,
+                {"required": ["path"], "properties": {"path": str}, "additional": False}, True),
         }
 
     def get(self, tool_id: str) -> ToolDefinition:
@@ -596,6 +611,53 @@ class ToolGateway:
             target.write_text(arguments["content"], encoding="utf-8")
             changed = previous_content != arguments["content"]
             return {"path": arguments["path"], "content_hash": content_hash(arguments["content"]), "changed": changed}
+        if tool_id == "capture_screen":
+            # [AJOUTÉ 21/10/2026 — demandé : élargir le registre d'outils
+            # tout en gardant l'approbation exacte obligatoire. Même garde
+            # de collision/parent que write_workspace_draft (voir
+            # commentaires ci-dessus pour les deux bugs réels déjà corrigés
+            # sur ce même motif) -- réutilisés tels quels plutôt que
+            # dupliqués, même classe de défaillance OS prévisible.
+            target = self._resolve_workspace_path(arguments["path"])
+            if target.is_dir():
+                raise PolicyDenied("cible de capture existante est un répertoire")
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise PolicyDenied(f"impossible de créer le répertoire parent de la cible : {exc}") from exc
+            import os  # [voir les autres branches de cette methode : import local, "os" devient
+                      # une variable locale a _execute() des qu'UNE SEULE branche l'importe ainsi]
+            if os.name != "nt":
+                # [HONNÊTE : pas de dépendance externe au MVP, et aucune
+                # bibliothèque de capture d'écran stdlib multiplateforme --
+                # implémenté uniquement pour Windows (System.Windows.Forms/
+                # System.Drawing via PowerShell, déjà présent sur toute
+                # machine Windows, zéro dépendance ajoutée).
+                raise PolicyDenied("capture_screen n'est implémenté que sur Windows dans ce MVP")
+            # Échappe les guillemets simples pour une insertion sûre dans un
+            # littéral PowerShell entre guillemets simples (defense en
+            # profondeur : target vient déjà de _resolve_workspace_path(),
+            # qui garantit un chemin réel sous self.workspace, pas un texte
+            # libre du modèle).
+            escaped_path = str(target).replace("'", "''")
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+                "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen; "
+                "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; "
+                "$g = [System.Drawing.Graphics]::FromImage($bmp); "
+                "$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); "
+                f"$bmp.Save('{escaped_path}', [System.Drawing.Imaging.ImageFormat]::Png); "
+                "$g.Dispose(); $bmp.Dispose()"
+            )
+            capture_result = _run_capped(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                cwd=self.workspace, timeout=30,
+            )
+            if capture_result.get("exit_code") != 0 or not target.is_file():
+                raise PolicyDenied(
+                    "échec de la capture d'écran : "
+                    + (capture_result.get("stderr") or capture_result.get("error") or "fichier non produit"))
+            return {"path": arguments["path"], "content_hash": hashlib.sha256(target.read_bytes()).hexdigest()}
         if tool_id == "run_declared_check":
             check = arguments["check"]
             if check == "draft_exists":

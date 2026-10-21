@@ -95,6 +95,7 @@ _OWASP_LLM_RISK = {
     "P-PATH-001": "LLM05:2025 Improper Output Handling",
     "P-PATH-002": "LLM05:2025 Improper Output Handling",
     "P-PATH-003": "LLM05:2025 Improper Output Handling",
+    "P-SCREEN-001": "LLM05:2025 Improper Output Handling",
     "P-URL-001": "LLM05:2025 Improper Output Handling",
     "P-URL-002": "LLM05:2025 Improper Output Handling",
 }
@@ -142,7 +143,8 @@ class PolicyEngine:
         # fichier et de vérifier un résultat déclaré.
         TaskProfile.AGENTIC_EXECUTION: {"read_fixture", "retrieve_fixture", "write_workspace_draft",
                                        "run_declared_check", "execute_python", "fetch_url",
-                                       "request_rea_analysis", "rea_inspect", "smokinggun_scan", "jacobian_verify"},
+                                       "request_rea_analysis", "rea_inspect", "smokinggun_scan", "jacobian_verify",
+                                       "capture_screen"},
     }
 
     def __init__(self) -> None:
@@ -213,6 +215,20 @@ class PolicyEngine:
                 return PolicyDecision("deny", "P-PATH-002", "chemin sortant du workspace")
             if raw_path not in manifest.allowed_paths or raw_path not in contract.allowed_paths:
                 return PolicyDecision("deny", "P-PATH-003", "chemin hors périmètre autorisé")
+        if tool_id == "capture_screen":
+            # [AJOUTÉ 21/10/2026 — même contrôle que write_workspace_draft
+            # (P-PATH-001/002/003), sous un rule_id dédié pour que l'audit
+            # distingue clairement un refus de capture d'écran d'un refus
+            # d'écriture de brouillon.
+            raw_path = arguments.get("path", "")
+            try:
+                normalized = PurePosixPath(raw_path)
+            except TypeError:
+                return PolicyDecision("deny", "P-SCREEN-001", "chemin invalide")
+            if normalized.is_absolute() or ".." in normalized.parts or is_drive_absolute_path(raw_path):
+                return PolicyDecision("deny", "P-SCREEN-001", "chemin sortant du workspace")
+            if raw_path not in manifest.allowed_paths or raw_path not in contract.allowed_paths:
+                return PolicyDecision("deny", "P-SCREEN-001", "chemin hors périmètre autorisé")
         if tool_id == "fetch_url":
             # [AJOUTÉ 18/10/2026 — R2] Même logique que write_workspace_draft
             # pour les chemins : allowlist EXACTE (pas de wildcard de

@@ -979,6 +979,26 @@ class HarnessTestCase(unittest.TestCase):
         )
         return replace(base, **overrides)
 
+    def test_t117_capture_screen_writes_a_real_png_inside_the_workspace(self) -> None:
+        # [AJOUTE 21/10/2026 -- nouvel outil, demande : elargir le registre
+        # tout en gardant l'approbation exacte obligatoire (meme pattern que
+        # write_workspace_draft). Verifie que l'appel complet
+        # (grant reel, policy.authorize() reel, PowerShell reel) produit un
+        # vrai PNG dans le workspace, pas juste un succes simule.
+        import sys
+        if sys.platform != "win32":
+            self.skipTest("capture_screen n'est implemente que sur Windows")
+        contract = self._agentic_contract(allowed_paths=["capture.png"], allowed_tools=["capture_screen"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "capture_screen", "arguments": {"path": "capture.png"}},
+        ]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        self.assertEqual(context.results[0]["result"]["path"], "capture.png")
+        target = context.workspace / "capture.png"
+        self.assertTrue(target.is_file())
+        self.assertGreater(target.stat().st_size, 1000, "le PNG produit doit avoir un contenu reel, pas un fichier vide")
+        self.assertEqual(target.read_bytes()[:8], b"\x89PNG\r\n\x1a\n", "signature PNG manquante")
+
     def test_t23_execute_python_runs_for_real_inside_workspace(self) -> None:
         # [AJOUTÉ 18/10/2026 — R2] Preuve que "exécuter du code" n'est pas
         # juste accepté par le policy engine mais tourne VRAIMENT : le script
