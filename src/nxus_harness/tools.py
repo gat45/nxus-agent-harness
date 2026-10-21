@@ -406,7 +406,27 @@ class ToolGateway:
             # verifie par l'agent), mais corrige par hygiene plutot que de
             # laisser un champ qui ment dans un resultat audite.
             previous_content = target.read_text(encoding="utf-8") if target.is_file() else None
-            target.parent.mkdir(parents=True, exist_ok=True)
+            # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai : le is_dir() ci-dessus ne couvre que la
+            # cible elle-meme -- si un segment INTERMEDIAIRE du chemin
+            # (le parent, ou un parent de parent) existe deja comme
+            # FICHIER plutot que comme repertoire ou absent, mkdir(parents=
+            # True, exist_ok=True) leve un FileExistsError/OSError brut
+            # ([WinError 183] sous Windows) non rattrape ici. Ce brut
+            # n'est PAS un PolicyDenied, donc il echappe au except
+            # PolicyDenied de invoke() (correctif P-EXEC-001) : aucune
+            # entree "policy"/"deny" n'est ecrite, alors que le grant a
+            # DEJA ete consomme (brule) par validate_and_consume() juste
+            # avant -- le journal d'audit s'arrete sur "approval consumed"
+            # sans aucune trace de ce qui est arrive a l'execution, et le
+            # grant a usage unique est perdu pour une operation qui n'a
+            # jamais reellement eu lieu. Convertit la meme famille de
+            # defaillance OS previsible en PolicyDenied, comme le is_dir()
+            # voisin le fait deja pour la collision sur la cible elle-meme.
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise PolicyDenied(f"impossible de créer le répertoire parent de la cible : {exc}") from exc
             target.write_text(arguments["content"], encoding="utf-8")
             changed = previous_content != arguments["content"]
             return {"path": arguments["path"], "content_hash": content_hash(arguments["content"]), "changed": changed}

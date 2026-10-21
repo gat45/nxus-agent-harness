@@ -893,6 +893,23 @@ class HarnessTestCase(unittest.TestCase):
         with self.assertRaises(PolicyDenied):
             gateway._execute("write_workspace_draft", {"path": "drafts/existing_dir", "content": "x"}, budget_seconds=5)
 
+    def test_t93_write_workspace_draft_rejects_parent_path_file_collision_cleanly(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : le is_dir() de test_t80 ne couvre que la CIBLE elle-meme --
+        # si un segment INTERMEDIAIRE du chemin (ici "drafts") existe deja
+        # comme FICHIER plutot que comme repertoire, mkdir(parents=True,
+        # exist_ok=True) levait un FileExistsError/OSError brut non
+        # rattrape, au lieu du PolicyDenied propre que le reste du
+        # codebase utilise deja pour les conditions previsibles.
+        gateway = ToolGateway(workspace=self.root / "ws-parentcollision", fixtures=self.root / "fixtures",
+                              registry=ToolRegistry(), policy=PolicyEngine(),
+                              approvals=ApprovalService(self.root / "approvals-parentcollision.json"),
+                              audit=AuditLog(self.root / "audit-parentcollision.jsonl", run_id="r", tenant_id="t"))
+        gateway.workspace.mkdir(parents=True, exist_ok=True)
+        (gateway.workspace / "drafts").write_text("je suis un fichier, pas un repertoire", encoding="utf-8")
+        with self.assertRaises(PolicyDenied):
+            gateway._execute("write_workspace_draft", {"path": "drafts/bar.md", "content": "x"}, budget_seconds=5)
+
     def test_t80_write_workspace_draft_changed_reflects_real_content_diff(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent : "changed"
         # etait toujours True, meme en reecrivant un contenu identique au
