@@ -80,7 +80,25 @@ class MemoryStore:
         if not path.is_file():
             return []
         lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
-        entries = [MemoryEntry(**json.loads(line)) for line in lines]
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : le json.loads(line) ci-dessous n'etait protege par AUCUN
+        # try/except -- seul le correctif du 20/10/2026 (_not_expired,
+        # juste en dessous) rattrape une valeur corrompue DANS un objet
+        # JSON par ailleurs valide. Une ligne tronquee (ecriture coupee
+        # par un crash/disque plein/ecrivain concurrent) faisait lever un
+        # JSONDecodeError non rattrape, qui remontait hors de recall() --
+        # donc hors de LlmPlanner._memory_context() -- et plantait la
+        # planification de la mission ENTIERE a cause d'UNE SEULE ligne
+        # corrompue. Meme classe et meme remede qu'evidence.py._read_jsonl()
+        # (ligne ignoree plutot que tout faire planter) -- les deux fichiers
+        # avaient divergeé malgre le commentaire d'evidence.py affirmant le
+        # contraire.
+        entries = []
+        for line in lines:
+            try:
+                entries.append(MemoryEntry(**json.loads(line)))
+            except json.JSONDecodeError:
+                continue
         # [AJOUTÉ 19/10/2026] Filtré par péremption AVANT d'appliquer `limit`,
         # sinon un vieux run expiré pourrait quand même occuper une place
         # dans la fenêtre récente si peu de runs plus récents existent.

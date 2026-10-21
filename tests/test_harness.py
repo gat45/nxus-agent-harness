@@ -576,6 +576,33 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual(run_ids, {"good-1", "corrupted", "good-2"},
                          "l'entree corrompue doit rester visible (echec ouvert), pas faire disparaitre les autres")
 
+    def test_t95_recall_survives_one_truncated_jsonl_line_among_valid_entries(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : contrairement a test_t78 (qui corrompt une VALEUR dans un
+        # objet JSON par ailleurs valide), ici c'est la ligne JSON elle-meme
+        # qui est tronquee (ecriture coupee par un crash/disque plein/
+        # ecrivain concurrent) -- json.loads(line) levait un JSONDecodeError
+        # NON RATTRAPE dans recall(), plantant la planification de la
+        # mission ENTIERE a cause d'UNE SEULE ligne corrompue.
+        from nxus_harness.memory import MemoryStore
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        store = MemoryStore(root)
+        store.record_run(run_id="good-1", tenant_id="tenant-truncated", task_id="t1",
+                         objective="tache valide 1", final_state="COMPLETED", tool_ids=[])
+        store.record_run(run_id="good-2", tenant_id="tenant-truncated", task_id="t2",
+                         objective="tache valide 2", final_state="COMPLETED", tool_ids=[])
+
+        memory_path = root / "tenant-truncated.jsonl"
+        with memory_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"run_id": "truncated", "tenant_id": "tenant-truncated", "task_id":\n')
+
+        entries = store.recall("tenant-truncated")  # ne doit pas lever
+        run_ids = {entry.run_id for entry in entries}
+        self.assertEqual(run_ids, {"good-1", "good-2"},
+                         "la ligne tronquee doit etre ignoree sans faire disparaitre les entrees valides")
+
     def test_t62_memory_context_neutralizes_chat_template_control_sequences(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai : contract.objective n'est jamais sanitise et memory.py le
