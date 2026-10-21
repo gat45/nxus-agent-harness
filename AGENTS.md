@@ -46,10 +46,11 @@ Tests : `PYTHONPATH=src py -m pytest tests/test_harness.py -q`.
 
 ## État de la campagne d'audit (2026-10-21)
 
-18 bugs réels trouvés et corrigés à ce jour, chacun avec un test de
+22 bugs réels trouvés et corrigés à ce jour, chacun avec un test de
 régression vérifié (échoue sans le correctif, confirmé par retrait
-temporaire). Classes de bugs dominantes rencontrées plusieurs fois —
-`nxus-bug-hunter` les connaît déjà, voir sa définition pour le détail :
+temporaire). 145 tests. Classes de bugs dominantes rencontrées plusieurs
+fois — `nxus-bug-hunter` les connaît déjà, voir sa définition pour le
+détail :
 
 1. Succès réel rapporté comme échec (ou l'inverse) par une étape dérivée
    non-autoritaire qui échoue après coup.
@@ -68,9 +69,22 @@ temporaire). Classes de bugs dominantes rencontrées plusieurs fois —
 7. Un mécanisme de supervision (timeout, plafond, kill switch) qui n'a
    prise que sur la ressource directement tracée, pas sur ce qu'elle a pu
    faire naître et qui lui survit.
+8. Une garantie affichée à l'humain ("aucun réseau/shell") qui ne
+   correspond pas aux opérations réellement proposées/exécutées.
+
+`nxus-reasoning-analyst` a aussi trouvé et fait corriger deux trous dans
+le pipeline de proposition (`llm_planner.py`) : la grammaire JSON Schema
+forçait toujours TOUTES les propriétés d'un outil comme `required`
+(ignorait le `required` réel du `ToolRegistry` — inerte aujourd'hui, mais
+prêt à mordre au premier outil avec un argument optionnel), et
+`ast.parse("")` n'étant pas une `SyntaxError`, un `execute_python` vide
+passait la grammaire ET le filtre syntaxique sans jamais déclencher la
+relance.
 
 Derniers commits (voir `git log` pour l'historique complet) :
-`f4e5893` (supervision des descendants détachés d'`execute_python`),
+`4533fbe` (grammaire required réel + code vide + garanties PLAN.md/
+report.md conditionnelles), `2be1561` (agents + AGENTS.md intégrés au
+projet), `f4e5893` (supervision des descendants détachés d'`execute_python`),
 `bdb14c5` (intégrité affichée de verification.json/report.md),
 `bd8ce8f` / `aee9da4` (intégrité de task.json / plan.manifest.json au
 rechargement), `84f54cd` (audit best-effort dans `_transition()`).
@@ -79,11 +93,18 @@ Pistes non encore closes (voir aussi la section "limites connues" de
 `docs/threat-model.md`) :
 
 - Pas de CI (`.github/workflows` absent).
-- `docs/threat-model.md:28` ("il n'exécute ni shell ni réseau") est
-  devenu faux depuis l'ajout de `fetch_url`/`rea_inspect`/`smokinggun_scan`
-  — à corriger.
 - La fenêtre de course résiduelle du Job Object (`tools.py`, entre
   `Popen()` et l'assignation au job) et le chemin POSIX du même correctif
   (`os.killpg`) ne sont documentés/raisonnés que théoriquement — jamais
   vérifiés sur une vraie machine POSIX (environnement de dev = Windows).
-- `tests/test_harness.py` est un seul fichier monolithique (3500+ lignes).
+- `tests/test_harness.py` est un seul fichier monolithique (3700+ lignes).
+- Le banc `scripts/bench_reasoning_quality.py` n'a tourné qu'avec n=4
+  essais réels (résultats narratifs dans `README.md`/
+  `DOCUMENTATION_SESSION_2026-10-18.md`, aucun artefact structuré
+  conservé) — la décision "raisonnement ON" qu'il a motivée est
+  anecdotique, pas statistiquement établie (n≈20-30 recommandé).
+- `nxus-reasoning-analyst` a identifié une piste d'impact probable élevé
+  non encore implémentée (nécessite un vrai serveur llama.cpp pour être
+  vérifiée) : un profil de sampling "mixte" pour les plans qui combinent
+  `execute_python` (profil code) et un autre outil R2 comme `fetch_url`
+  dans le même appel `structured_chat()` — voir son rapport pour le détail.
