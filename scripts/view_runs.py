@@ -126,7 +126,18 @@ class RunsHandler(BaseHTTPRequestHandler):
         # transporte que objective/token : un plafond de quelques Ko suffit
         # largement et rejette le payload avant de le lire.
         MAX_MISSION_BODY_BYTES = 8192
-        length = int(self.headers.get("Content-Length", "0"))
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : int() sur un en-tete Content-Length non numerique
+        # (ex. "abc") levait un ValueError brut, non rattrape, AVANT meme
+        # le plafond de taille ci-dessous -- une entete HTTP est une
+        # entree reseau non fiable comme une autre, un client malveillant
+        # peut y mettre n'importe quoi. La connexion etait coupee sans
+        # aucune reponse HTTP (ni meme un 400), au lieu d'un refus propre.
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_html(400, "<h1>400 — Content-Length invalide</h1>")
+            return
         if length > MAX_MISSION_BODY_BYTES:
             self._send_html(413, "<h1>413 — corps de requête trop volumineux</h1>")
             return
@@ -370,7 +381,17 @@ class RunsHandler(BaseHTTPRequestHandler):
                 f"<td>{html.escape(v.get('details', ''))}</td></tr>" for v in verification
             )
             verification_block = f"<table border=1><tr><th>check</th><th>status</th><th>details</th></tr>{verification_html}</table>"
-        except json.JSONDecodeError:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : seul json.JSONDecodeError etait rattrape ici -- un
+        # verification.json syntaxiquement valide mais qui n'est pas une
+        # liste d'objets (ex. "null" ou "{}", plausible si le processus a
+        # ete tue en plein milieu de l'ecriture du fichier) fait reussir
+        # json.loads() puis lever TypeError/AttributeError sur v.get(...),
+        # non rattrape -- la requete HTTP entiere plante sans AUCUNE
+        # reponse (connexion coupee), au lieu du rendu degrade attendu.
+        # Meme garde que _render_live() applique deja a progress.json/
+        # model_timings.json pour exactement ce cas.
+        except (json.JSONDecodeError, TypeError, AttributeError):
             verification_block = f"<pre>{html.escape(verification_raw)}</pre>"
 
         body = f"""

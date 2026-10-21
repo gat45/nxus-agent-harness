@@ -148,6 +148,7 @@ class AuditLog:
         previous = "GENESIS"
         if not path.exists():
             return False, "journal absent"
+        seen_hashes = {"GENESIS"}
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             try:
                 event = json.loads(line)
@@ -168,9 +169,28 @@ class AuditLog:
             if "TOP_SECRET_" in serialized or "sk-" in serialized:
                 return False, f"secret non redacté ligne {line_no}"
             previous = actual_hash
+            seen_hashes.add(actual_hash)
         sidecar_path = path.with_suffix(path.suffix + ".tail")
         if sidecar_path.exists():
             expected_tail = sidecar_path.read_text(encoding="utf-8").strip()
-            if expected_tail and expected_tail != previous:
+            # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis
+            # verifie en vrai : append() ecrit la ligne du journal, PUIS
+            # (hors de la meme operation atomique) met a jour ce sidecar --
+            # un crash exactement entre les deux (coupure d'alimentation,
+            # OOM kill, kill -9) laisse un journal PARFAITEMENT chaine et
+            # legitime, mais un sidecar qui retarde d'un event. L'ancienne
+            # comparaison expected_tail != previous traitait ce retard
+            # legitime exactement comme une vraie troncature (suppression
+            # de lignes de fin), rapportant INVALIDE un run par ailleurs
+            # parfaitement sain. Distinction : lors d'une VRAIE troncature,
+            # les lignes retirees du journal emportent avec elles leur
+            # event_hash -- le hash memorise par le sidecar n'apparait plus
+            # NULLE PART dans le fichier. Lors d'un simple retard du
+            # sidecar (rien n'a ete supprime), ce hash reste present
+            # ailleurs dans le fichier (comme previous_hash d'une ligne
+            # posterieure, ou comme le hash d'une ligne ecrite depuis).
+            # Seule l'ABSENCE totale du hash memorise dans le journal
+            # signale une troncature reelle.
+            if expected_tail and expected_tail != previous and expected_tail not in seen_hashes:
                 return False, "troncature détectée (dernier hash connu absent du journal)"
         return True, "chaîne valide"

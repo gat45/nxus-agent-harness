@@ -1856,6 +1856,49 @@ class ViewRunsSecurityTests(unittest.TestCase):
         self.assertIn(b"200", got.split(b"\r\n", 1)[0])
         self.assertLess(elapsed, 2.0)
 
+    def test_t98_non_numeric_content_length_on_mission_gets_a_clean_400(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : int(self.headers.get("Content-Length", "0")) levait un
+        # ValueError brut et non rattrape pour un en-tete non numerique
+        # (ex. "abc"), AVANT meme le plafond de taille deja corrige
+        # ci-dessus -- la connexion etait simplement coupee sans AUCUNE
+        # reponse HTTP, au lieu d'un refus propre.
+        import socket
+        malicious = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        malicious.sendall(
+            (
+                "POST /mission HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                "Content-Length: abc\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("utf-8")
+        )
+        malicious.settimeout(5)
+        response = malicious.recv(4096)
+        self.assertIn(b"400", response.split(b"\r\n", 1)[0])
+
+    def test_t99_malformed_verification_json_renders_degraded_instead_of_dropping_the_connection(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : _render_run() ne rattrapait que json.JSONDecodeError pour
+        # verification.json -- un contenu syntaxiquement valide mais qui
+        # n'est PAS une liste (ex. "null", plausible si le processus a ete
+        # tue en plein milieu de l'ecriture du fichier) fait reussir
+        # json.loads() puis lever un TypeError non rattrape sur `for v in
+        # verification`, plantant la requete entiere (connexion coupee
+        # sans aucune reponse).
+        import socket
+
+        run_dir = self.root / "runs" / "tenantA" / "run123"
+        run_dir.mkdir(parents=True)
+        (run_dir / "verification.json").write_text("null", encoding="utf-8")
+
+        conn = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        conn.sendall(f"GET /run/tenantA/run123 HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nConnection: close\r\n\r\n".encode())
+        conn.settimeout(5)
+        response = conn.recv(8192)
+        self.assertIn(b"200", response.split(b"\r\n", 1)[0])
+
 
 class LlamaCppAdapterSecurityTests(unittest.TestCase):
     """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
@@ -2026,6 +2069,53 @@ class AdapterTruncatedEnvelopeTests(unittest.TestCase):
         ))
         with self.assertRaises(ValidationError):
             adapter.structured_chat([{"role": "user", "content": "x"}], schema={"required": []})
+
+
+class AuditLogSidecarLagTests(unittest.TestCase):
+    """[AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : append() ecrit la ligne du journal, PUIS (hors de la meme
+    operation atomique) met a jour le sidecar .tail -- un crash exactement
+    entre les deux (coupure, OOM kill, kill -9) laisse un journal
+    PARFAITEMENT chaine et legitime, mais un sidecar qui retarde d'un
+    event. verify() traitait ce retard legitime comme une vraie
+    troncature, rapportant INVALIDE un run par ailleurs parfaitement
+    sain."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="nxus-audit-sidecar-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_t100_verify_tolerates_a_sidecar_that_lags_one_legitimate_append(self) -> None:
+        from nxus_harness.audit import AuditLog
+        from nxus_harness.models import canonical_json, content_hash, utc_now
+        from uuid import uuid4
+
+        path = self.root / "audit.jsonl"
+        log = AuditLog(path, run_id="r", tenant_id="t")
+        log.append("gateway", "step1", "allow", {})
+        log.append("gateway", "step2", "allow", {})
+        self.assertEqual(AuditLog.verify(path), (True, "chaîne valide"))
+
+        # Simule un append() legitime dont l'ecriture de la ligne journal a
+        # reussi mais dont la mise a jour du sidecar a ete interrompue par
+        # un crash -- exactement la meme forme de payload qu'append().
+        previous_hash = log._tail_hash()
+        payload = {
+            "event_id": str(uuid4()), "timestamp": utc_now(), "run_id": "r", "tenant_id": "t",
+            "component": "gateway", "action": "step3", "decision": "allow", "details": {},
+            "previous_hash": previous_hash,
+        }
+        event_hash = content_hash(payload)
+        payload["event_hash"] = event_hash
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(canonical_json(payload) + "\n")
+        # Le sidecar n'est PAS mis a jour (simule le crash) : il retient
+        # encore le hash de step2.
+
+        ok, detail = AuditLog.verify(path)
+        self.assertTrue(ok, f"un journal legitime et parfaitement chaine ne doit pas etre signale invalide : {detail}")
 
 
 class AuditLogConcurrencyTests(unittest.TestCase):
