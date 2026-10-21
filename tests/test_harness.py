@@ -2701,6 +2701,52 @@ class MemoryRecordRunBestEffortTests(unittest.TestCase):
                         "l'operation a reellement reussi, elle ne doit pas etre masquee par l'echec de _write_progress()")
         self.assertEqual(context.state, RunState.VERIFYING)
 
+    def test_t92_approve_revokes_its_own_grants_when_the_final_transition_fails(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, meme classe que f91908c/753623e/f1fab14 mais avec un vrai
+        # risque de double-execution : les grants sont DEJA emis et
+        # persistes quand la transition finale vers APPROVED echoue (ex.
+        # _persist_state() en panne disque). Sans correctif, un operateur
+        # qui relance approve() normalement obtient un SECOND jeu de
+        # grants valides pour les memes operations -- deux grants vivants
+        # et independants, cassant l'invariant a usage unique.
+        from nxus_harness import engine as engine_module
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.create_run(contract)
+        self.engine.plan(context)
+
+        original_persist_state = engine_module.HarnessEngine._persist_state
+        engine_module.HarnessEngine._persist_state = staticmethod(
+            lambda ctx: (_ for _ in ()).throw(OSError("disque plein (simulé) pendant l'approbation")))
+        try:
+            with self.assertRaises(OSError):
+                self.engine.approve(context, actor_id=contract.actor_id)
+        finally:
+            engine_module.HarnessEngine._persist_state = staticmethod(original_persist_state)
+
+        # Le grant emis avant l'echec de la transition doit avoir ete
+        # revoque -- aucun grant vivant ne doit survivre a cette tentative
+        # ratee d'approve().
+        approvals_data = json.loads((context.run_dir / "approvals.json").read_text(encoding="utf-8"))
+        self.assertTrue(approvals_data, "un grant aurait du etre emis avant l'echec de la transition")
+        self.assertTrue(all(grant["consumed"] for grant in approvals_data),
+                        "tous les grants de la tentative echouee doivent etre revoques (consumed=True)")
+
+        # Un retry normal doit maintenant fonctionner et ne produire QU'UN
+        # jeu de grants vivants.
+        context.state = RunState.AWAITING_APPROVAL
+        grants = self.engine.approve(context, actor_id=contract.actor_id)
+        approvals_data_after_retry = json.loads((context.run_dir / "approvals.json").read_text(encoding="utf-8"))
+        live_grants = [g for g in approvals_data_after_retry if not g["consumed"]]
+        self.assertEqual(len(live_grants), len(grants), "un seul jeu de grants vivants doit exister apres le retry")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

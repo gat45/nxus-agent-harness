@@ -215,7 +215,30 @@ class HarnessEngine:
                                                      tool_id=operation.tool_id, arguments=operation.arguments,
                                                      ttl_seconds=ttl_seconds)
                     grant_ids.append(grant.grant_id)
-            self._transition(context, RunState.APPROVED, "approve", {"grant_count": len(grant_ids)})
+            try:
+                self._transition(context, RunState.APPROVED, "approve", {"grant_count": len(grant_ids)})
+            except Exception:
+                # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+                # verifie en vrai, meme classe que les trois correctifs
+                # precedents (f91908c, 753623e, f1fab14), mais ICI avec un
+                # vrai risque de double-execution plutot qu'un simple
+                # artefact derive manquant : les grants ci-dessus sont DEJA
+                # emis et persistes sur approvals.json quand cette
+                # transition finale echoue (ex. _persist_state() en panne
+                # disque) -- context.state passe quand meme a APPROVED EN
+                # MEMOIRE (avant l'echec de persistance), mais state.json
+                # reste a AWAITING_APPROVAL. Un operateur qui relance
+                # approve() normalement voit l'etat correct sur disque,
+                # revalide, et EMET UN SECOND jeu de grants pour les memes
+                # operations -- deux grants vivants et independants pour
+                # la meme operation approuvee, cassant l'invariant a usage
+                # unique (verifie : executer avec le grant orphelin laisse
+                # le grant "officiel" rendu a l'appelant toujours vivant et
+                # consommable). Revoque les grants de CETTE tentative avant
+                # de remonter l'echec, pour qu'aucun grant orphelin ne
+                # survive a un approve() qui n'a pas reellement reussi.
+                context.approvals.revoke_all()
+                raise
             return grant_ids
 
     def execute(self, context: RunContext, grants: list[str]) -> list[dict[str, Any]]:
