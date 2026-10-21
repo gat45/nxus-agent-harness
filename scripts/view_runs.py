@@ -138,7 +138,15 @@ class RunsHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._send_html(400, "<h1>400 — Content-Length invalide</h1>")
             return
-        if length > MAX_MISSION_BODY_BYTES:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, meme classe que le correctif mirois sur chat_ui.py (commit
+        # c93d053) : int() accepte une valeur NEGATIVE (ex. "-1") sans
+        # lever -- l'ancien garde `length > MAX_MISSION_BODY_BYTES` ne la
+        # rejetait pas, et rfile.read(length) avec une taille negative
+        # signifie "lire jusqu'a EOF" (semantique io/socket standard),
+        # rouvrant le meme danger non borne que ce plafond existe pour
+        # empecher.
+        if length < 0 or length > MAX_MISSION_BODY_BYTES:
             self._send_html(413, "<h1>413 — corps de requête trop volumineux</h1>")
             return
         body = self.rfile.read(length).decode("utf-8") if length else ""

@@ -1856,6 +1856,37 @@ class ViewRunsSecurityTests(unittest.TestCase):
         self.assertIn(b"200", got.split(b"\r\n", 1)[0])
         self.assertLess(elapsed, 2.0)
 
+    def test_t102_negative_content_length_on_mission_is_rejected_without_starving_other_clients(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, meme classe que test_t101 (chat_ui.py) : int() accepte une
+        # valeur NEGATIVE sans lever -- l'ancien garde `length >
+        # MAX_MISSION_BODY_BYTES` ne la rejetait pas, et rfile.read(length)
+        # avec une taille negative signifie "lire jusqu'a EOF", rouvrant le
+        # meme danger non borne que ce plafond existe pour empecher.
+        import socket
+        malicious = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        malicious.sendall(
+            (
+                "POST /mission HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                "Content-Length: -1\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n"
+                "Connection: keep-alive\r\n\r\n"
+            ).encode("utf-8")
+        )
+        malicious.settimeout(5)
+        response = malicious.recv(4096)
+        self.assertIn(b"413", response.split(b"\r\n", 1)[0])
+
+        start = time.monotonic()
+        healthy = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        healthy.sendall(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nConnection: close\r\n\r\n".encode())
+        healthy.settimeout(5)
+        got = healthy.recv(4096)
+        elapsed = time.monotonic() - start
+        self.assertIn(b"200", got.split(b"\r\n", 1)[0])
+        self.assertLess(elapsed, 2.0)
+
     def test_t98_non_numeric_content_length_on_mission_gets_a_clean_400(self) -> None:
         # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai : int(self.headers.get("Content-Length", "0")) levait un
