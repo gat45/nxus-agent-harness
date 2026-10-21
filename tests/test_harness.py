@@ -753,6 +753,51 @@ class HarnessTestCase(unittest.TestCase):
         target = context.workspace / "drafts" / "test.md"
         self.assertFalse(target.is_file(), "le contenu tampere ne doit jamais atteindre le workspace")
 
+    def test_t110_resume_run_rejects_a_contract_tampered_on_disk_to_widen_allowed_tools(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (meme audit d'integration que test_t109, sur un AUTRE
+        # artefact) : SimulatedPlanner.create() ignore completement
+        # allowed_tools (propose write_workspace_draft+run_declared_check
+        # pour CODE_CHANGE quel que soit allowed_tools), et approve()
+        # n'appelle jamais policy.authorize() -- le SEUL garde-fou qui
+        # compare une operation au contrat est authorize(), appele
+        # UNIQUEMENT dans execute(), avec le contrat RECHARGE EN DIRECT par
+        # le resume_run() qui precede. task.json peut donc etre modifie
+        # sur disque entre plan() et approve() (exactement la fenetre du
+        # flux CLI en deux process, submit puis approve) pour elargir
+        # allowed_tools sans que rien ne le detecte -- une operation qui
+        # aurait du rester bloquee par P-CONTRACT-001 passe alors jusqu'a
+        # COMPLETED.
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["run_declared_check"],  # write_workspace_draft délibérément exclu
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.create_run(contract)
+        self.engine.plan(context)
+
+        # Scenario de controle (sans tamper) : la protection existante
+        # (policy.authorize() dans execute()) bloque bien l'operation hors
+        # contrat -- confirme que le garde-fou de base fonctionne.
+        control_resumed = self.engine.resume_run(contract.tenant_id, context.run_id)
+        with self.assertRaises(PolicyDenied):
+            self.engine.approve_and_run(control_resumed, actor_id=contract.actor_id)
+        target = context.workspace / "drafts" / "test.md"
+        self.assertFalse(target.is_file(), "le scenario de controle ne doit rien ecrire")
+
+        # Tamper : task.json est modifie sur disque pour elargir
+        # allowed_tools, sans toucher a plan.manifest.json ni a PLAN.md.
+        task_path = context.run_dir / "task.json"
+        task_data = json.loads(task_path.read_text(encoding="utf-8"))
+        task_data["allowed_tools"].append("write_workspace_draft")
+        task_path.write_text(json.dumps(task_data), encoding="utf-8")
+
+        with self.assertRaises(ValidationError):
+            self.engine.resume_run(contract.tenant_id, context.run_id)
+        self.assertFalse(target.is_file(), "le contrat tampere ne doit jamais atteindre le workspace")
+
     def test_t19_memory_is_isolated_per_tenant(self) -> None:
         self.engine.run_demo(self.contract(tenant="tenant-x"))
         self.assertEqual(len(self.engine.memory.recall("tenant-x")), 1)

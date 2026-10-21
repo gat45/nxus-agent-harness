@@ -175,6 +175,24 @@ class HarnessEngine:
                 f"plan.manifest.json modifié depuis sa dernière transition enregistrée pour {tenant_id}/{run_id} "
                 f"(hash attendu {expected_manifest_hash}, obtenu {manifest.manifest_hash}) -- manifeste altéré, "
                 "run bloqué par sécurité")
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, meme classe que le controle manifest_hash ci-dessus mais
+        # sur task.json/TaskContract (voir le commentaire dans
+        # _persist_state() plus bas pour le mecanisme complet et la
+        # reproduction) : task.json peut etre modifie sur disque entre
+        # plan() et le resume_run() qui precede approve(), elargissant par
+        # exemple allowed_tools sans que rien ne le detecte -- aucun autre
+        # garde-fou ne compare jamais le contrat recharge a celui qui a
+        # produit le plan deja approuve par l'humain. contract_hash est
+        # stable pour toute la duree du run (TaskContract est immuable,
+        # jamais modifie legitimement apres create_run()), donc comparer
+        # au PREMIER contract_hash jamais persiste suffit.
+        expected_contract_hash = state_data.get("contract_hash")
+        if expected_contract_hash is not None and content_hash(contract.to_dict()) != expected_contract_hash:
+            raise ValidationError(
+                f"task.json modifié depuis la création du run {tenant_id}/{run_id} "
+                f"(hash attendu {expected_contract_hash}, obtenu {content_hash(contract.to_dict())}) -- "
+                "contrat altéré, run bloqué par sécurité")
         audit = AuditLog(run_dir / "audit.jsonl", run_id=run_id, tenant_id=tenant_id)
         return RunContext(run_id, contract, run_dir, run_dir / "workspace", state, audit,
                           ApprovalService(run_dir / "approvals.json"), EvidenceStore(run_dir), PolicyEngine(), manifest, [])
@@ -586,7 +604,33 @@ class HarnessEngine:
     @staticmethod
     def _persist_state(context: RunContext) -> None:
         payload = {"run_id": context.run_id, "state": context.state.value, "updated_at": utc_now(),
-                   "manifest_hash": context.manifest.manifest_hash if context.manifest else None}
+                   "manifest_hash": context.manifest.manifest_hash if context.manifest else None,
+                   # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis
+                   # verifie en vrai, meme classe que manifest_hash
+                   # ci-dessus mais sur l'artefact task.json/TaskContract :
+                   # ReflectionReview.review() ne verifie JAMAIS
+                   # allowed_tools, et approve() n'appelle jamais
+                   # policy.authorize() -- le SEUL garde-fou qui compare
+                   # une operation au contrat est authorize(), appele
+                   # UNIQUEMENT dans execute() via gateway.invoke(), avec
+                   # le contract RECHARGE EN DIRECT par le resume_run() qui
+                   # a precede. Si task.json est modifie sur disque entre
+                   # plan() (l'humain lit PLAN.md, genere depuis le
+                   # manifeste deja hash-protege) et le resume_run() qui
+                   # precede approve_and_run() -- exactement la fenetre du
+                   # flux CLI en deux process (submit puis approve) --
+                   # resume_run() rechargeait silencieusement un contrat
+                   # elargi (ex. allowed_tools agrandi) et l'execution
+                   # passait une operation qui aurait du rester bloquee par
+                   # P-CONTRACT-001. Reproduit en vrai : allowed_tools=
+                   # ["run_declared_check"] au plan (write_workspace_draft
+                   # exclu), edition disque de task.json pour y ajouter
+                   # write_workspace_draft avant resume_run() -> COMPLETED,
+                   # fichier reellement ecrit. Scelle ici a chaque
+                   # transition, comme manifest_hash, pour que resume_run()
+                   # puisse detecter toute modification du contrat depuis
+                   # sa derniere transition enregistree.
+                   "contract_hash": content_hash(context.contract.to_dict())}
         # [AJOUTÉ 19/10/2026 — trouvé en vérifiant la famille de bugs de
         # concurrence corrigée plus haut ce jour] write_text() n'est PAS
         # atomique (ouvre, tronque, écrit, ferme) -- resume_run() (plus
