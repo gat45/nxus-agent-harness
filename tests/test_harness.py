@@ -2684,6 +2684,111 @@ class ViewRunsLiveErrorSurfacingTests(unittest.TestCase):
         self.assertIn("plafond 50", body, "la raison reelle de l'abandon n'apparait pas sur /live")
 
 
+class ViewRunsForgedArtifactTests(unittest.TestCase):
+    """[AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : _render_run() (view_runs.py) affichait verification.json/
+    report.md TELS QUELS sur disque, sans jamais les recomparer a
+    audit.jsonl (la trace qui fait autorite selon les commentaires
+    d'engine.py lui-meme). Un run reellement COMPLETED edite a la main
+    APRES coup (texte "FORGE" ajoute) s'affichait integralement, sans la
+    moindre alerte, alors qu'AuditLog.verify() restait "chaine valide" en
+    parallele."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="nxus-forged-"))
+        (self.root / "fixtures").mkdir()
+        shutil.copy(Path(__file__).resolve().parents[1] / "fixtures" / "corpus.md",
+                   self.root / "fixtures" / "corpus.md")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _get(self, port: int, path: str) -> str:
+        import socket
+        conn = socket.create_connection(("127.0.0.1", port), timeout=5)
+        conn.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode())
+        conn.settimeout(5)
+        chunks = []
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    def test_t111_forged_verification_json_is_flagged_not_silently_displayed(self) -> None:
+        engine = HarnessEngine(self.root)
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-forged", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = engine.run_demo(contract)
+        self.assertEqual(context.state, RunState.COMPLETED)
+
+        # Edition manuelle du verification.json d'un run par ailleurs
+        # legitime -- audit.jsonl, lui, n'est pas touche et reste valide.
+        verification_path = context.run_dir / "verification.json"
+        verification_data = json.loads(verification_path.read_text(encoding="utf-8"))
+        verification_data[0]["details"] = "FORGED-draft_exists"
+        verification_path.write_text(json.dumps(verification_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "view_runs.py"
+        port = 8801
+        proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--port", str(port), "--root", str(self.root)],
+            cwd=str(script_path.parents[1]),
+            env={**__import__("os").environ, "PYTHONPATH": str(script_path.parents[1] / "src")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(1.0)
+            body = self._get(port, f"/run/{contract.tenant_id}/{context.run_id}")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+        self.assertIn("FORGED-draft_exists", body, "le contenu tampere doit quand meme etre visible")
+        self.assertIn("modifié depuis sa génération", body, "la page doit signaler que verification.json a ete altere")
+
+    def test_t112_untampered_verification_json_shows_no_integrity_warning(self) -> None:
+        engine = HarnessEngine(self.root)
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-clean", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = engine.run_demo(contract)
+
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "view_runs.py"
+        port = 8802
+        proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--port", str(port), "--root", str(self.root)],
+            cwd=str(script_path.parents[1]),
+            env={**__import__("os").environ, "PYTHONPATH": str(script_path.parents[1] / "src")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(1.0)
+            body = self._get(port, f"/run/{contract.tenant_id}/{context.run_id}")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+        self.assertNotIn("modifié depuis sa génération", body,
+                         "un artefact non modifie ne doit jamais declencher une fausse alerte")
+
+
 class LlmPlannerRetryBudgetTests(unittest.TestCase):
     """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis mesure en
     vrai : la relance d'_propose_operations() sur une erreur de syntaxe

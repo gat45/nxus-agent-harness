@@ -450,7 +450,21 @@ class HarnessEngine:
         # si _persist_state() echoue, aucun verification.json n'existe du
         # tout plutot qu'un qui affiche faussement un succes complet.
         self._transition(context, target, "complete", {"final_status": target.value})
-        (context.run_dir / "verification.json").write_text(json.dumps([result.to_dict() for result in results], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        verification_text = json.dumps([result.to_dict() for result in results], ensure_ascii=False, indent=2) + "\n"
+        (context.run_dir / "verification.json").write_text(verification_text, encoding="utf-8")
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (view_runs.py affiche verification.json/report.md TELS QUELS
+        # sur disque, sans jamais les recomparer a audit.jsonl -- la trace
+        # qui fait autorite selon les commentaires de ce fichier lui-meme) :
+        # un run reellement COMPLETED (verification.json tout en PASS,
+        # audit.jsonl inchange et toujours "chaine valide") a ete edite a
+        # la main (texte "FORGE" ajoute), puis servi par le VRAI serveur
+        # HTTP de view_runs.py sur /run/<tenant>/<run_id> -- la page
+        # affichait le texte forge integralement, sans la moindre alerte,
+        # alors qu'AuditLog.verify() restait "chaine valide" en parallele.
+        # Scelle ici un hash du texte exact ecrit, pour que la page puisse
+        # detecter toute modification posterieure.
+        (context.run_dir / "verification.json.sha256").write_text(content_hash(verification_text), encoding="utf-8")
         self._render_report(context, results)
         # [AJOUTÉ 18/10/2026 — mémoire inter-run] Écrit APRÈS la transition
         # finale : l'entrée reflète toujours un état déjà validé par ce même
@@ -701,3 +715,9 @@ class HarnessEngine:
 Ce résultat valide uniquement le profil simulé R0/R1 et les preuves locales. Il ne constitue pas une certification de sécurité ni une autorisation de déploiement.
 """
         (context.run_dir / "report.md").write_text(report, encoding="utf-8")
+        # [AJOUTE 21/10/2026 -- meme correctif que verification.json.sha256
+        # (voir verify_and_complete() plus haut), meme raison : view_runs.py
+        # affiche report.md tel quel sur disque, sans jamais le recomparer
+        # a audit.jsonl -- une edition manuelle posterieure (texte forge)
+        # s'affichait integralement, sans alerte.
+        (context.run_dir / "report.md.sha256").write_text(content_hash(report), encoding="utf-8")

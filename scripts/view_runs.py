@@ -41,7 +41,7 @@ from nxus_harness.audit import AuditLog
 from nxus_harness.engine import HarnessEngine
 from nxus_harness.llama_cpp_adapter import LlamaCppAdapter, LlamaCppProfile
 from nxus_harness.llm_planner import LlmPlanner
-from nxus_harness.models import PolicyDenied, RiskLevel, TaskContract, TaskProfile, ValidationError
+from nxus_harness.models import PolicyDenied, RiskLevel, TaskContract, TaskProfile, ValidationError, content_hash
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -378,6 +378,30 @@ class RunsHandler(BaseHTTPRequestHandler):
             target = run_dir / name
             return target.read_text(encoding="utf-8") if target.is_file() else "(absent)"
 
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : cette page affichait verification.json/report.md TELS
+        # QUELS sur disque, sans jamais les recomparer a audit.jsonl (la
+        # trace qui fait autorite selon les commentaires d'engine.py
+        # lui-meme). Un run reellement COMPLETED edite a la main APRES coup
+        # (texte "FORGE" ajoute) s'affichait integralement, sans la moindre
+        # alerte, alors qu'AuditLog.verify() restait "chaine valide" en
+        # parallele -- la page ne le consultait jamais pour contredire le
+        # forgeage. engine.py scelle maintenant un hash (<nom>.sha256) au
+        # moment ou chaque artefact est ecrit (verify_and_complete()) ;
+        # recalcule ici et compare pour detecter toute modification
+        # posterieure. Sidecar absent (run genere avant ce correctif,
+        # ou fichier lui-meme absent) = integrite inconnue, pas alteree --
+        # on ne peut pas inventer une preuve qui n'existe pas.
+        def integrity_note(name: str, raw: str) -> str:
+            sidecar = run_dir / f"{name}.sha256"
+            if not sidecar.is_file() or raw == "(absent)":
+                return ""
+            expected = sidecar.read_text(encoding="utf-8").strip()
+            if content_hash(raw) != expected:
+                return (f'<p style="color:red;font-weight:bold">⚠ {html.escape(name)} modifié depuis sa génération '
+                        "(hash ne correspond plus au scellé d'origine) — contenu ci-dessous NON FIABLE.</p>")
+            return ""
+
         audit_path = run_dir / "audit.jsonl"
         chain_ok, chain_detail = AuditLog.verify(audit_path) if audit_path.is_file() else (False, "audit.jsonl absent")
         verification_raw = read("verification.json")
@@ -402,17 +426,20 @@ class RunsHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, TypeError, AttributeError):
             verification_block = f"<pre>{html.escape(verification_raw)}</pre>"
 
+        report_raw = read("report.md")
         body = f"""
 <h1>Run {html.escape(tenant)} / {html.escape(run_id)}</h1>
 <p><a href="/">&laquo; retour</a></p>
 <h2>Chaine d'audit</h2>
 <p>{'OK' if chain_ok else 'INVALIDE'} — {html.escape(chain_detail)}</p>
 <h2>Verification</h2>
+{integrity_note('verification.json', verification_raw)}
 {verification_block}
 <h2>Plan (PLAN.md)</h2>
 <pre>{html.escape(read('PLAN.md'))}</pre>
 <h2>Rapport (report.md)</h2>
-<pre>{html.escape(read('report.md'))}</pre>
+{integrity_note('report.md', report_raw)}
+<pre>{html.escape(report_raw)}</pre>
 """
         self._send_html(200, body)
 
