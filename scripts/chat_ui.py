@@ -129,8 +129,21 @@ class ChatHandler(BaseHTTPRequestHandler):
         # corps AVANT de le lire si le Content-Length declare depasse ce
         # plafond large mais fini.
         MAX_CHAT_BODY_BYTES = 65536
-        length = int(self.headers.get("Content-Length", 0))
-        if length > MAX_CHAT_BODY_BYTES:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : int() accepte une valeur NEGATIVE (ex. "-1") sans lever --
+        # le garde `length > MAX_CHAT_BODY_BYTES` ne la rejette pas, et
+        # self.rfile.read(length) avec une taille negative signifie "lire
+        # jusqu'a EOF" (semantique io/socket standard) : exactement le
+        # danger non borne que ce plafond existe pour empecher. Un en-tete
+        # non numerique (ex. "abc") levait aussi un ValueError brut, non
+        # rattrape. Rejette maintenant toute valeur hors de [0, plafond].
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_response(400)
+            self.end_headers()
+            return
+        if length < 0 or length > MAX_CHAT_BODY_BYTES:
             self.send_response(413)
             self.end_headers()
             return

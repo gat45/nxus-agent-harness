@@ -2300,6 +2300,38 @@ class ChatUiSecurityTests(unittest.TestCase):
         self.assertIn(b"200", got.split(b"\r\n", 1)[0])
         self.assertLess(elapsed, 2.0)
 
+    def test_t101_negative_content_length_on_chat_is_rejected_without_starving_other_clients(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : int() accepte une valeur NEGATIVE (ex. "-1") sans lever --
+        # le garde `length > MAX_CHAT_BODY_BYTES` ne la rejetait pas, et
+        # self.rfile.read(length) avec une taille negative signifie "lire
+        # jusqu'a EOF" (semantique io/socket standard), rouvrant exactement
+        # le danger non borne que le plafond (test_t63 ci-dessus) etait
+        # censee empecher.
+        import socket
+        malicious = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        malicious.sendall(
+            (
+                "POST /api/chat HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                "Content-Length: -1\r\n"
+                "Content-Type: application/json\r\n"
+                "Connection: keep-alive\r\n\r\n"
+            ).encode("utf-8")
+        )
+        malicious.settimeout(5)
+        response = malicious.recv(4096)
+        self.assertIn(b"413", response.split(b"\r\n", 1)[0])
+
+        start = time.monotonic()
+        healthy = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        healthy.sendall(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nConnection: close\r\n\r\n".encode())
+        healthy.settimeout(5)
+        got = healthy.recv(4096)
+        elapsed = time.monotonic() - start
+        self.assertIn(b"200", got.split(b"\r\n", 1)[0])
+        self.assertLess(elapsed, 2.0)
+
 
 class ViewRunsLiveErrorSurfacingTests(unittest.TestCase):
     """[AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
