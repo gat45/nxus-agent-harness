@@ -999,6 +999,44 @@ class HarnessTestCase(unittest.TestCase):
         self.assertGreater(target.stat().st_size, 1000, "le PNG produit doit avoir un contenu reel, pas un fichier vide")
         self.assertEqual(target.read_bytes()[:8], b"\x89PNG\r\n\x1a\n", "signature PNG manquante")
 
+    def test_t118_read_external_file_reads_real_content_outside_the_workspace(self) -> None:
+        # [AJOUTE 21/10/2026 -- nouvel outil, demande : lecture hors
+        # workspace sous le meme modele d'approbation exacte que fetch_url.
+        # Verifie l'appel complet (grant reel, policy.authorize() reel)
+        # lit bien le VRAI contenu d'un fichier reel hors du workspace du
+        # run, et que le resultat est marque untrusted.
+        import tempfile
+        external_dir = Path(tempfile.mkdtemp())
+        external_file = external_dir / "external.txt"
+        external_file.write_text("contenu reel hors workspace", encoding="utf-8")
+
+        contract = self._agentic_contract(allowed_tools=["read_external_file"],
+                                          allowed_read_paths=[str(external_file)])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "read_external_file", "arguments": {"path": str(external_file)}},
+        ]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        result = context.results[0]["result"]
+        self.assertEqual(result["content"], "contenu reel hors workspace")
+        self.assertTrue(result["untrusted"])
+
+    def test_t118_read_external_file_rejects_a_path_outside_the_allowlist(self) -> None:
+        # Garde-fou de non-regression : un chemin absent de allowed_read_paths
+        # (meme s'il existe reellement sur disque) doit etre refuse par
+        # policy.authorize() avant toute lecture, comme fetch_url pour une
+        # URL hors allowlist.
+        import tempfile
+        external_dir = Path(tempfile.mkdtemp())
+        external_file = external_dir / "secret.txt"
+        external_file.write_text("ne doit jamais etre lu", encoding="utf-8")
+
+        contract = self._agentic_contract(allowed_tools=["read_external_file"], allowed_read_paths=[])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "read_external_file", "arguments": {"path": str(external_file)}},
+        ]})
+        with self.assertRaises(PolicyDenied):
+            self.engine.run_with_llm(contract, LlmPlanner(fake))
+
     def test_t23_execute_python_runs_for_real_inside_workspace(self) -> None:
         # [AJOUTÉ 18/10/2026 — R2] Preuve que "exécuter du code" n'est pas
         # juste accepté par le policy engine mais tourne VRAIMENT : le script

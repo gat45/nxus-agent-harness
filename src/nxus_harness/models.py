@@ -186,6 +186,14 @@ class TaskContract:
     # cette liste est refusée par PolicyEngine, jamais par "approximation de
     # domaine" (pas de wildcard, pas de sous-domaine implicite).
     allowed_urls: list[str] = field(default_factory=list)
+    # [AJOUTÉ 21/10/2026 — demandé : élargir le registre d'outils (lecture
+    # hors workspace) tout en gardant l'approbation exacte obligatoire.
+    # Même principe que allowed_urls pour fetch_url : allowlist EXACTE de
+    # chemins absolus pré-approuvés par l'opérateur, jamais un répertoire
+    # ou un wildcard — chaque chemin lu par read_external_file doit figurer
+    # ICI (et dans manifest.allowed_read_paths, même double vérification
+    # que allowed_urls) tel quel.
+    allowed_read_paths: list[str] = field(default_factory=list)
     data_classification: str = "synthetic"
     budget_seconds: int = 60
     desired_draft: str = DEFAULT_DESIRED_DRAFT
@@ -217,6 +225,7 @@ class TaskContract:
                 allowed_paths=list(value.get("allowed_paths", [])),
                 allowed_tools=list(value.get("allowed_tools", [])),
                 allowed_urls=list(value.get("allowed_urls", [])),
+                allowed_read_paths=list(value.get("allowed_read_paths", [])),
                 data_classification=value.get("data_classification", "synthetic"),
                 budget_seconds=int(value.get("budget_seconds", 60)),
                 desired_draft=value.get("desired_draft", DEFAULT_DESIRED_DRAFT),
@@ -266,11 +275,15 @@ class PlanManifest:
     # [AJOUTÉ 18/10/2026 — R2] Même défense en profondeur que allowed_paths :
     # PolicyEngine vérifie fetch_url contre CE champ ET contract.allowed_urls.
     allowed_urls: list[str] = field(default_factory=list)
+    # [AJOUTÉ 21/10/2026 — voir TaskContract.allowed_read_paths] même
+    # double vérification pour read_external_file.
+    allowed_read_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id, "task_id": self.task_id, "base_snapshot": self.base_snapshot,
             "allowed_paths": self.allowed_paths, "allowed_urls": self.allowed_urls,
+            "allowed_read_paths": self.allowed_read_paths,
             "operations": [operation.to_dict() for operation in self.operations],
             "created_at": self.created_at, "expires_at": self.expires_at, "plan_hash": self.plan_hash,
         }
@@ -284,6 +297,7 @@ class PlanManifest:
         return cls(
             run_id=value["run_id"], task_id=value["task_id"], base_snapshot=value["base_snapshot"],
             allowed_paths=list(value["allowed_paths"]), allowed_urls=list(value.get("allowed_urls", [])),
+            allowed_read_paths=list(value.get("allowed_read_paths", [])),
             operations=[PlannedOperation.from_dict(item) for item in value["operations"]],
             created_at=value["created_at"], expires_at=value["expires_at"], plan_hash=value["plan_hash"],
         )

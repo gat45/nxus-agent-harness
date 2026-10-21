@@ -96,6 +96,7 @@ _OWASP_LLM_RISK = {
     "P-PATH-002": "LLM05:2025 Improper Output Handling",
     "P-PATH-003": "LLM05:2025 Improper Output Handling",
     "P-SCREEN-001": "LLM05:2025 Improper Output Handling",
+    "P-READ-001": "LLM05:2025 Improper Output Handling",
     "P-URL-001": "LLM05:2025 Improper Output Handling",
     "P-URL-002": "LLM05:2025 Improper Output Handling",
 }
@@ -144,7 +145,7 @@ class PolicyEngine:
         TaskProfile.AGENTIC_EXECUTION: {"read_fixture", "retrieve_fixture", "write_workspace_draft",
                                        "run_declared_check", "execute_python", "fetch_url",
                                        "request_rea_analysis", "rea_inspect", "smokinggun_scan", "jacobian_verify",
-                                       "capture_screen"},
+                                       "capture_screen", "read_external_file"},
     }
 
     def __init__(self) -> None:
@@ -272,6 +273,17 @@ class PolicyEngine:
                 return PolicyDecision("deny", "P-URL-001", "hôte non public refusé (garde SSRF)")
             if raw_url not in manifest.allowed_urls or raw_url not in contract.allowed_urls:
                 return PolicyDecision("deny", "P-URL-002", "URL hors périmètre autorisé")
+        if tool_id == "read_external_file":
+            # [AJOUTÉ 21/10/2026 — même logique que fetch_url pour les URLs :
+            # allowlist EXACTE de chemins absolus, dans le manifeste ET dans
+            # le contrat, jamais un répertoire ni un wildcard. Contrairement
+            # à write_workspace_draft, ce chemin n'est PAS relatif au
+            # workspace par construction (c'est précisément le but de cet
+            # outil) -- pas de contrôle ".." / absolu à faire ici, l'allowlist
+            # double elle-même EST le périmètre.
+            raw_path = arguments.get("path", "")
+            if not raw_path or raw_path not in manifest.allowed_read_paths or raw_path not in contract.allowed_read_paths:
+                return PolicyDecision("deny", "P-READ-001", "chemin hors périmètre de lecture autorisé")
         if tool_id == "rea_inspect":
             # [AJOUTÉ 18/10/2026 — pont vers la VRAIE CLI rea (morluto/rea)]
             # rea a des dizaines de sous-commandes, certaines destructrices

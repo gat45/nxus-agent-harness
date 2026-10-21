@@ -403,6 +403,13 @@ class ToolRegistry:
             # écrit dans le workspace doit être dans allowed_paths).
             "capture_screen": ToolDefinition("capture_screen", "1.0", "harness", RiskLevel.R1,
                 {"required": ["path"], "properties": {"path": str}, "additional": False}, True),
+            # [AJOUTÉ 21/10/2026 — demandé : lecture hors workspace, sous le
+            # même modèle d'approbation exacte que fetch_url pour le réseau.
+            # Allowlist absolue (contract.allowed_read_paths ET
+            # manifest.allowed_read_paths, voir policy.py P-READ-001/002) --
+            # jamais un répertoire, jamais un wildcard.
+            "read_external_file": ToolDefinition("read_external_file", "1.0", "harness", RiskLevel.R1,
+                {"required": ["path"], "properties": {"path": str}, "additional": False}, True),
         }
 
     def get(self, tool_id: str) -> ToolDefinition:
@@ -851,6 +858,26 @@ class ToolGateway:
                 return {"url": arguments["url"], "error": str(exc), "untrusted": True}
             finally:
                 socket_module.getaddrinfo = original_getaddrinfo
+        if tool_id == "read_external_file":
+            # [AJOUTÉ 21/10/2026 — demandé : lecture hors workspace, sous le
+            # même modèle d'approbation exacte que fetch_url. policy.py a
+            # déjà validé que ce chemin EXACT figure dans
+            # contract.allowed_read_paths ET manifest.allowed_read_paths
+            # avant d'arriver ici — pas de résolution relative au workspace
+            # (c'est précisément le but de cet outil), chemin pris tel quel.
+            # "untrusted": True comme fetch_url/read_fixture : ce contenu
+            # vient de l'extérieur du périmètre gouverné, jamais traité
+            # comme une instruction ou une politique.
+            target = Path(arguments["path"])
+            try:
+                if not target.is_file():
+                    return {"path": arguments["path"], "error": "fichier introuvable", "untrusted": True}
+                raw = target.read_bytes()[:1_000_000]
+                content = raw.decode("utf-8", errors="replace")
+                return {"path": arguments["path"], "content": content,
+                       "truncated": target.stat().st_size > 1_000_000, "untrusted": True}
+            except OSError as exc:
+                return {"path": arguments["path"], "error": str(exc), "untrusted": True}
         if tool_id == "request_rea_analysis":
             # [AJOUTÉ 18/10/2026] Relais ASYNCHRONE : n'exécute rien, écrit
             # juste la demande pour qu'un humain/Claude la traite hors de ce
