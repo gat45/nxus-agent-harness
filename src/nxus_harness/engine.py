@@ -141,11 +141,40 @@ class HarnessEngine:
         # place juste au-dessus pour tenant_id/run_id.
         try:
             contract = TaskContract.from_dict(json.loads((run_dir / "task.json").read_text(encoding="utf-8")))
-            state = RunState(json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["state"])
+            state_data = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+            state = RunState(state_data["state"])
             manifest_path = run_dir / "plan.manifest.json"
             manifest = PlanManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8"))) if manifest_path.is_file() else None
         except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
             raise ValidationError(f"état corrompu pour {tenant_id}/{run_id} : {exc}") from exc
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (integration resume_run()/plan.manifest.json/PLAN.md) :
+        # plan.manifest.json et PLAN.md sont deux artefacts separes ecrits
+        # une fois par plan() et jamais revalides l'un par rapport a
+        # l'autre au rechargement. manifest_hash EST deja calcule et
+        # ecrit dans state.json a chaque transition (_persist_state(),
+        # voir plus bas) -- mais rien ne le relisait jamais pour
+        # comparaison : approve() faisait confiance aveuglement au
+        # manifeste tout juste charge depuis le disque. Si
+        # plan.manifest.json est modifie sur disque APRES avoir ete
+        # presente a l'humain (edition manuelle, bug d'un autre outil,
+        # ecrivain concurrent) et AVANT approve(), resume_run() chargeait
+        # silencieusement le manifeste modifie et approve_and_run()
+        # emettait les grants et executait SES operations modifiees, sans
+        # jamais revalider contre PLAN.md (reste inchange, donc affichant
+        # l'ANCIEN contenu a l'humain) -- contredisant directement la
+        # garantie de "manifeste exact" du modele de menace du projet
+        # (docs/threat-model.md). Reproduit en vrai : create_run -> plan
+        # -> edition disque du `content` d'une operation deja valide
+        # (tool_id/path intacts, donc aucun garde-fou existant ne la
+        # detecte) -> resume_run -> approve_and_run -> COMPLETED, le
+        # fichier reellement ecrit differe de ce que PLAN.md montrait.
+        expected_manifest_hash = state_data.get("manifest_hash")
+        if manifest is not None and expected_manifest_hash is not None and manifest.manifest_hash != expected_manifest_hash:
+            raise ValidationError(
+                f"plan.manifest.json modifié depuis sa dernière transition enregistrée pour {tenant_id}/{run_id} "
+                f"(hash attendu {expected_manifest_hash}, obtenu {manifest.manifest_hash}) -- manifeste altéré, "
+                "run bloqué par sécurité")
         audit = AuditLog(run_dir / "audit.jsonl", run_id=run_id, tenant_id=tenant_id)
         return RunContext(run_id, contract, run_dir, run_dir / "workspace", state, audit,
                           ApprovalService(run_dir / "approvals.json"), EvidenceStore(run_dir), PolicyEngine(), manifest, [])

@@ -688,6 +688,16 @@ class HarnessTestCase(unittest.TestCase):
         # d'atteindre la 2e et de lever PolicyDenied -- jamais rattrape,
         # donc le run restait AWAITING_APPROVAL avec un grant deja vivant
         # sur disque dont aucun appelant n'a connaissance.
+        #
+        # [MIS A JOUR 21/10/2026 -- le correctif du 21/10 (integrite
+        # manifest_hash dans resume_run(), voir engine.py) detecte
+        # maintenant TOUTE alteration de plan.manifest.json -- y compris
+        # celle-ci -- des le rechargement depuis le disque, AVANT meme
+        # d'atteindre approve(). Le tool_id invalide leve donc desormais
+        # ValidationError (integrite du manifeste) a resume_run(), pas
+        # PolicyDenied (registre d'outils) a approve() -- detection plus
+        # tot, garantie plus forte ; aucun grant n'est jamais emis dans les
+        # deux cas.
         context = self.engine.create_run(self.contract())
         self.engine.plan(context)
         manifest_path = context.run_dir / "plan.manifest.json"
@@ -695,14 +705,53 @@ class HarnessTestCase(unittest.TestCase):
         manifest_data["operations"][-1]["tool_id"] = "no_such_tool_v2"
         manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
 
-        resumed = self.engine.resume_run(context.contract.tenant_id, context.run_id)
-        with self.assertRaises(PolicyDenied):
-            self.engine.approve(resumed, actor_id=resumed.contract.actor_id)
+        with self.assertRaises(ValidationError):
+            self.engine.resume_run(context.contract.tenant_id, context.run_id)
 
         approvals_path = context.run_dir / "approvals.json"
         if approvals_path.is_file():
             approvals_data = json.loads(approvals_path.read_text(encoding="utf-8"))
             self.assertEqual(approvals_data, [], "aucun grant ne devrait avoir ete emis avant la validation complete")
+
+    def test_t109_resume_run_rejects_a_manifest_tampered_on_disk_after_being_presented_for_approval(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai (audit d'integration cross-fichiers) : contrairement a
+        # test_t74 (tool_id invalide, deja attrape par le registre), ici on
+        # altere uniquement le `content` d'une operation deja valide
+        # (tool_id et path intacts, path dans allowed_paths) -- ce qui
+        # contournait TOUS les garde-fous connus (registre d'outils,
+        # verification de chemin, hash d'arguments du grant, qui se
+        # recalcule lui-meme APRES avoir lu le manifeste tampere donc
+        # "coherent avec lui-meme"). PLAN.md (lu par l'humain pour
+        # approuver) reste INCHANGE -- seul plan.manifest.json (source de
+        # verite reellement utilisee par approve()/execute()) est modifie
+        # sur disque entre plan() et approve(), simulant une edition
+        # manuelle, un bug d'un autre outil, ou un ecrivain concurrent.
+        # Avant le correctif, resume_run() chargeait silencieusement ce
+        # manifeste modifie et approve_and_run() ecrivait reellement le
+        # contenu tampere -- contredisant la garantie de "manifeste exact"
+        # du modele de menace (docs/threat-model.md).
+        contract = self.contract()
+        context = self.engine.create_run(contract)
+        self.engine.plan(context)
+
+        plan_md_before = (context.run_dir / "PLAN.md").read_text(encoding="utf-8")
+        self.assertIn("contenu sûr", plan_md_before)
+
+        manifest_path = context.run_dir / "plan.manifest.json"
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for operation in manifest_data["operations"]:
+            if operation["tool_id"] == "write_workspace_draft":
+                operation["arguments"]["content"] = "CONTENU REMPLACE APRES APPROBATION (jamais vu par l'humain)"
+        manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+        with self.assertRaises(ValidationError):
+            self.engine.resume_run(contract.tenant_id, context.run_id)
+
+        # Le contenu tampere ne doit jamais atteindre le workspace -- le
+        # run est bloque avant meme d'atteindre approve()/execute().
+        target = context.workspace / "drafts" / "test.md"
+        self.assertFalse(target.is_file(), "le contenu tampere ne doit jamais atteindre le workspace")
 
     def test_t19_memory_is_isolated_per_tenant(self) -> None:
         self.engine.run_demo(self.contract(tenant="tenant-x"))
