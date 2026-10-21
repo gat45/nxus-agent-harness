@@ -2678,6 +2678,30 @@ class MemoryRecordRunBestEffortTests(unittest.TestCase):
         state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
         self.assertEqual(state_on_disk, "COMPLETED")
 
+    def test_t94_approve_cli_reports_success_even_if_skeptical_review_adapter_fails_to_construct(self) -> None:
+        from nxus_harness import cli
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.submit(contract)
+        self.assertEqual(context.state, RunState.AWAITING_APPROVAL)
+
+        exit_code = cli.main([
+            "--root", str(self.root), "approve", contract.tenant_id, context.run_id,
+            "--actor", contract.actor_id, "--yes",
+            "--llm", "some-model.gguf", "--base-url", "http://not-loopback.example.com:8080",
+        ])
+
+        self.assertEqual(exit_code, 0, "un run reellement COMPLETED ne doit pas etre rapporte comme un echec "
+                                        "parce que l'adaptateur d'avis consultatif ne s'est pas construit")
+        state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(state_on_disk, "COMPLETED")
+
     def test_t91_execute_does_not_block_a_successful_operation_on_a_progress_write_failure(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai, troisieme instance de la meme classe que f91908c/753623e :

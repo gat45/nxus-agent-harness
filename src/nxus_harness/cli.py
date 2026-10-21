@@ -153,13 +153,32 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"run_id": context.run_id, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
                 return 2
             if args.llm:
-                adapter = LlamaCppAdapter(LlamaCppProfile(base_url=args.base_url, model=args.llm, enabled=True))
-                avis = skeptical_review(
-                    adapter, objective=context.contract.objective,
-                    plan_text=(context.run_dir / "PLAN.md").read_text(encoding="utf-8"),
-                    workspace=context.workspace, results=context.results or [],
-                )
-                (context.run_dir / "skeptical_review.txt").write_text(avis, encoding="utf-8")
+                # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis
+                # verifie en vrai : engine.approve_and_run() ci-dessus a
+                # DEJA reussi (run durablement COMPLETED sur disque) quand
+                # ce bloc s'execute -- skeptical_review() elle-meme
+                # rattrape deja toute Exception interne ("une panne ici ne
+                # doit jamais faire echouer le run"), mais la CONSTRUCTION
+                # de LlamaCppAdapter/LlamaCppProfile.validate() (ex. --base-
+                # url non loopback) etait hors de ce filet et hors de tout
+                # try/except local : une ValidationError s'y echappait
+                # jusqu'au except generique de main(), qui affichait une
+                # erreur et renvoyait exit 2 -- un run reellement COMPLETED
+                # etait alors indistinguable d'un echec reel pour tout
+                # script qui ne regarde que le code de sortie. Meme classe
+                # que les bugs deja corriges (succes reel masque par
+                # l'echec d'une etape non autoritaire posterieure).
+                try:
+                    adapter = LlamaCppAdapter(LlamaCppProfile(base_url=args.base_url, model=args.llm, enabled=True))
+                    avis = skeptical_review(
+                        adapter, objective=context.contract.objective,
+                        plan_text=(context.run_dir / "PLAN.md").read_text(encoding="utf-8"),
+                        workspace=context.workspace, results=context.results or [],
+                    )
+                    (context.run_dir / "skeptical_review.txt").write_text(avis, encoding="utf-8")
+                except (ValidationError, OSError) as exc:
+                    (context.run_dir / "skeptical_review.txt").write_text(
+                        f"[avis consultatif indisponible : {exc}]\n", encoding="utf-8")
             print(json.dumps({"run_id": context.run_id, "state": context.state.value, "run_dir": str(context.run_dir)}, ensure_ascii=False))
             return 0 if context.state.value == "COMPLETED" else 1
 
