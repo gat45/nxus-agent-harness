@@ -250,7 +250,25 @@ class HarnessEngine:
                 # une checklist qui avance pendant l'exécution, pas seulement
                 # un état final. Contenu dérivé, jamais source de vérité :
                 # audit.jsonl reste la trace faisant autorité.
-                self._write_progress(context, done_count=len(results))
+                try:
+                    self._write_progress(context, done_count=len(results))
+                except OSError:
+                    # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis
+                    # verifie en vrai, meme classe que les deux correctifs
+                    # precedents (f91908c, 753623e) : gateway.invoke()
+                    # ci-dessus a DEJA reellement reussi (effet reel sur
+                    # disque) quand cette ligne s'execute. _write_progress()
+                    # est explicitement documente comme derive/best-effort
+                    # (jamais source de verite), mais son ecriture n'etait
+                    # pas protegee et se trouvait DANS le except Exception
+                    # de cette boucle, prevu pour les vraies pannes d'outil
+                    # -- une panne disque ici (progress.json) transformait
+                    # une operation reellement reussie (et toutes celles
+                    # d'avant dans la boucle) en run BLOCKED, pire que les
+                    # deux bugs precedents car le run n'atteint plus jamais
+                    # VERIFYING/COMPLETED du tout, pas seulement un artefact
+                    # derive manquant.
+                    pass
         except Exception as exc:
             self._transition(context, RunState.BLOCKED, "execution_blocked", {"error": str(exc)})
             raise

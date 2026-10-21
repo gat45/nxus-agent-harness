@@ -2661,6 +2661,46 @@ class MemoryRecordRunBestEffortTests(unittest.TestCase):
         state_on_disk = json.loads((context.run_dir / "state.json").read_text(encoding="utf-8"))["state"]
         self.assertEqual(state_on_disk, "COMPLETED")
 
+    def test_t91_execute_does_not_block_a_successful_operation_on_a_progress_write_failure(self) -> None:
+        # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai, troisieme instance de la meme classe que f91908c/753623e :
+        # gateway.invoke() a DEJA reellement reussi (effet reel sur disque)
+        # quand _write_progress() s'execute. _write_progress() est
+        # explicitement documente comme derive/best-effort (jamais source
+        # de verite), mais son ecriture n'etait pas protegee et se
+        # trouvait DANS le except Exception de la boucle d'execute(), prevu
+        # pour les vraies pannes d'outil -- une panne disque ici
+        # (progress.json) transformait une operation reellement reussie en
+        # run BLOCKED.
+        from nxus_harness import engine as engine_module
+
+        contract = TaskContract(
+            task_id="test-task", tenant_id="tenant-a", actor_id="operator", objective="Créer un brouillon local.",
+            acceptance_criteria=["brouillon présent", "contrôle réussi"], profile=TaskProfile.CODE_CHANGE,
+            max_risk=RiskLevel.R1, allowed_paths=["drafts/test.md"],
+            allowed_tools=["write_workspace_draft", "run_declared_check"],
+            desired_draft="# Brouillon\ncontenu sûr\n",
+        )
+        context = self.engine.create_run(contract)
+        self.engine.plan(context)
+        grants = self.engine.approve(context, actor_id=contract.actor_id)
+
+        original_write_progress = engine_module.HarnessEngine._write_progress
+        engine_module.HarnessEngine._write_progress = staticmethod(
+            lambda ctx, *, done_count: (_ for _ in ()).throw(OSError("disque plein (simulé) pendant progress.json")))
+        try:
+            self.engine.execute(context, grants)  # ne doit PAS lever : _write_progress() est best-effort
+        finally:
+            engine_module.HarnessEngine._write_progress = staticmethod(original_write_progress)
+
+        # L'operation write_workspace_draft a reellement reussi AVANT que
+        # _write_progress() n'echoue : le fichier doit exister sur disque,
+        # meme si execute() a (a tort, avant ce correctif) leve une
+        # exception et marque le run BLOCKED a cause de cette seule panne.
+        self.assertTrue((context.workspace / "drafts" / "test.md").is_file(),
+                        "l'operation a reellement reussi, elle ne doit pas etre masquee par l'echec de _write_progress()")
+        self.assertEqual(context.state, RunState.VERIFYING)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
