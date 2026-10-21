@@ -1097,6 +1097,39 @@ class HarnessTestCase(unittest.TestCase):
         with self.assertRaises(PolicyDenied):
             engine.run_with_llm(contract, LlmPlanner(fake))
 
+    def test_t120_browser_render_page_shares_fetch_urls_allowlist_and_ssrf_guard(self) -> None:
+        # [AJOUTE 21/10/2026 -- nouvel outil, demande : navigateur. Meme
+        # convention que test_t23_fetch_url_within_allowlist_is_approved_and_attempted
+        # (pas d'acces reseau REEL garanti en CI) : example.invalid
+        # (RFC 2606, ne resout jamais) pour verifier que la policy ALLOW
+        # passe et que _execute() est reellement atteint (lance un vrai
+        # navigateur Chromium headless, pas un mock) sans jamais crasher,
+        # quel que soit le resultat du rendu.
+        import sys
+        if sys.platform != "win32":
+            self.skipTest("browser_render_page cherche un navigateur a des chemins Windows")
+        contract = self._agentic_contract(allowed_tools=["browser_render_page"],
+                                          allowed_urls=["https://example.invalid/data"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "browser_render_page", "arguments": {"url": "https://example.invalid/data"}},
+        ]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        result = context.results[0]["result"]
+        self.assertEqual(result["url"], "https://example.invalid/data")
+        self.assertTrue(result["untrusted"])
+
+    def test_t120_browser_render_page_denies_private_hosts(self) -> None:
+        # Garde-fou de non-regression : reutilise le meme bloc de policy
+        # que fetch_url -- un hote prive doit etre refuse AVANT meme de
+        # lancer un navigateur.
+        contract = self._agentic_contract(allowed_tools=["browser_render_page"],
+                                          allowed_urls=["http://127.0.0.1:8080/"])
+        fake = _FakeAdapter({"operations": [
+            {"tool_id": "browser_render_page", "arguments": {"url": "http://127.0.0.1:8080/"}},
+        ]})
+        with self.assertRaises(PolicyDenied):
+            self.engine.run_with_llm(contract, LlmPlanner(fake))
+
     def test_t23_execute_python_runs_for_real_inside_workspace(self) -> None:
         # [AJOUTÉ 18/10/2026 — R2] Preuve que "exécuter du code" n'est pas
         # juste accepté par le policy engine mais tourne VRAIMENT : le script

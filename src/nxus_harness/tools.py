@@ -420,6 +420,15 @@ class ToolRegistry:
             "mcp_call": ToolDefinition("mcp_call", "1.0", "harness", RiskLevel.R2,
                 {"required": ["tool_name", "arguments_json"],
                 "properties": {"tool_name": str, "arguments_json": str}, "additional": False}, True),
+            # [AJOUTÉ 21/10/2026 — demandé : navigateur, sous le même modèle
+            # d'approbation exacte. R2 comme fetch_url -- même surface
+            # réseau (une URL), même allowlist EXACTE réutilisée telle
+            # quelle (contract.allowed_urls/manifest.allowed_urls, voir
+            # policy.py), mais via un navigateur Chromium headless réel
+            # plutôt qu'un GET HTTP brut : récupère le DOM après exécution
+            # JS, ce que fetch_url ne peut structurellement pas faire.
+            "browser_render_page": ToolDefinition("browser_render_page", "1.0", "harness", RiskLevel.R2,
+                {"required": ["url"], "properties": {"url": str}, "additional": False}, True),
         }
 
     def get(self, tool_id: str) -> ToolDefinition:
@@ -876,6 +885,41 @@ class ToolGateway:
                 return {"url": arguments["url"], "error": str(exc), "untrusted": True}
             finally:
                 socket_module.getaddrinfo = original_getaddrinfo
+        if tool_id == "browser_render_page":
+            # [AJOUTÉ 21/10/2026 — demandé : navigateur. policy.py a déjà
+            # validé (même bloc que fetch_url) l'allowlist EXACTE et la
+            # garde SSRF de base sur le hostname. Revalide ici juste avant
+            # le lancement, même raisonnement TOCTOU que fetch_url -- mais
+            # SANS l'épinglage DNS complet de fetch_url (impossible à
+            # appliquer de la même façon à un process navigateur externe,
+            # qui fait sa PROPRE résolution DNS) : limite honnête,
+            # documentée, pas une garantie équivalente.
+            from .policy import resolve_public_ips
+            from urllib.parse import urlparse
+            host = urlparse(arguments["url"]).hostname or ""
+            try:
+                resolve_public_ips(host)
+            except ValidationError as exc:
+                return {"url": arguments["url"], "error": f"garde SSRF : {exc}", "untrusted": True}
+            browser_path = next((candidate for candidate in (
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ) if Path(candidate).is_file()), None)
+            if browser_path is None:
+                raise PolicyDenied("aucun navigateur Chromium trouvé sur cette machine")
+            render_result = _run_capped(
+                [browser_path, "--headless=new", "--disable-gpu", "--no-sandbox",
+                "--virtual-time-budget=4000", "--dump-dom", arguments["url"]],
+                cwd=self.workspace, timeout=30, max_stdout=1_000_000,
+            )
+            if render_result.get("exit_code") != 0:
+                return {"url": arguments["url"],
+                       "error": render_result.get("stderr") or render_result.get("error") or "échec du rendu",
+                       "untrusted": True}
+            return {"url": arguments["url"], "content": render_result["stdout"],
+                   "truncated": render_result.get("output_truncated", False), "untrusted": True}
         if tool_id == "read_external_file":
             # [AJOUTÉ 21/10/2026 — demandé : lecture hors workspace, sous le
             # même modèle d'approbation exacte que fetch_url. policy.py a

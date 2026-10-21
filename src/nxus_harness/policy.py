@@ -148,7 +148,7 @@ class PolicyEngine:
         TaskProfile.AGENTIC_EXECUTION: {"read_fixture", "retrieve_fixture", "write_workspace_draft",
                                        "run_declared_check", "execute_python", "fetch_url",
                                        "request_rea_analysis", "rea_inspect", "smokinggun_scan", "jacobian_verify",
-                                       "capture_screen", "read_external_file", "mcp_call"},
+                                       "capture_screen", "read_external_file", "mcp_call", "browser_render_page"},
     }
 
     def __init__(self) -> None:
@@ -233,7 +233,14 @@ class PolicyEngine:
                 return PolicyDecision("deny", "P-SCREEN-001", "chemin sortant du workspace")
             if raw_path not in manifest.allowed_paths or raw_path not in contract.allowed_paths:
                 return PolicyDecision("deny", "P-SCREEN-001", "chemin hors périmètre autorisé")
-        if tool_id == "fetch_url":
+        if tool_id in ("fetch_url", "browser_render_page"):
+            # [MIS A JOUR 21/10/2026 — browser_render_page (demandé : rendu
+            # navigateur) partage EXACTEMENT ce bloc : même surface réseau
+            # (une URL), même allowlist, même garde SSRF -- seul le
+            # mécanisme de récupération diffère (navigateur headless réel
+            # plutôt que GET HTTP brut), voir tools.py pour le détail et la
+            # limite honnête sur l'épinglage DNS (non applicable à un
+            # process navigateur externe de la même façon).
             # [AJOUTÉ 18/10/2026 — R2] Même logique que write_workspace_draft
             # pour les chemins : allowlist EXACTE (pas de wildcard de
             # domaine), dans le manifeste ET dans le contrat. Garde SSRF
