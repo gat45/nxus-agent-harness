@@ -998,6 +998,45 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual((context.workspace / "preuve.txt").read_text(encoding="utf-8"), "ok")
         self.assertEqual(context.results[0]["result"]["exit_code"], 0)
 
+    def test_t113_execute_python_kills_a_detached_grandchild_that_outlives_the_direct_process(self) -> None:
+        # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+        # vrai : le timeout, le plafond de sortie et le cancel_event (kill
+        # switch) de _run_capped n'ont de prise QUE sur le process direct
+        # trace -- aucun des trois ne se declenche quand ce process se
+        # termine NORMALEMENT et RAPIDEMENT, donc _kill_tree() n'etait
+        # JAMAIS appelee dans ce cas. Un code approuve qui lance lui-meme
+        # un processus DETACHE (CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+        # sous Windows) puis quitte immediatement laissait ce petit-fils
+        # tourner indefiniment, totalement hors de portee de toute limite
+        # du harnais (duree, sortie, kill switch), meme apres que le run
+        # entier ait ete declare COMPLETED avec succes -- confirme : une
+        # seule approbation exacte execute_python pouvait en pratique
+        # accorder une execution de duree et de ressources ILLIMITEES.
+        import tempfile
+        import time
+
+        witness = Path(tempfile.mkdtemp()) / "witness.txt"
+        grandchild_code = f"import time; time.sleep(3); open({str(witness)!r}, 'w').write('ran')"
+        code = (
+            "import subprocess, sys\n"
+            f"subprocess.Popen(\n"
+            f"    [sys.executable, '-c', {grandchild_code!r}],\n"
+            "    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,\n"
+            "    close_fds=True,\n"
+            ")\n"
+        )
+        contract = self._agentic_contract(allowed_tools=["execute_python"])
+        fake = _FakeAdapter({"operations": [{"tool_id": "execute_python", "arguments": {"code": code}}]})
+        context = self.engine.run_with_llm(contract, LlmPlanner(fake))
+        self.assertEqual(context.results[0]["result"]["exit_code"], 0)
+        self.assertFalse(context.results[0]["result"]["timed_out"])
+        self.assertFalse(witness.is_file(), "le run ne doit pas attendre le petit-fils detache pour se terminer")
+
+        time.sleep(5)
+        self.assertFalse(witness.is_file(),
+                         "le petit-fils detache doit avoir ete tue avec le process direct, "
+                         "pas avoir survecu a la fin du run")
+
     def test_t80_write_workspace_draft_rejects_directory_collision_cleanly(self) -> None:
         # [AJOUTE 20/10/2026 -- bug reel trouve par un agent puis verifie en
         # vrai : si la cible existe deja comme REPERTOIRE (collision avec

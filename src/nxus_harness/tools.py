@@ -8,8 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
-from typing import Any
+from typing import Any, Callable
+import ctypes
 import json
+import os
 import subprocess
 
 from .approvals import ApprovalService
@@ -53,8 +55,31 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     EN PREMIER, tant que cmd.exe est vivant pour que `/T` remonte son arbre ;
     proc.kill() ensuite ne sert qu'en repli (taskkill absent). POSIX :
     proc.kill() seul suffit déjà (aucun appel de ce module n'utilise
-    shell=True sur POSIX, donc pas de cmd shell intermédiaire à traverser)."""
-    import os
+    shell=True sur POSIX, donc pas de cmd shell intermédiaire à traverser).
+
+    [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+    vrai : CETTE fonction (et donc taskkill /T) n'a de prise que si le PID
+    racine est ENCORE VIVANT au moment de l'appel -- or elle n'etait
+    JAMAIS appelee quand le process direct (ex. execute_python) se
+    termine NORMALEMENT et RAPIDEMENT, bien avant tout timeout/annulation.
+    Un code approuve qui lance lui-meme un processus DETACHE
+    (CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS) puis se termine en moins
+    d'une seconde echappe donc totalement a cette fonction -- reproduit en
+    vrai : process direct termine en 0.19s, petit-fils detache toujours
+    vivant 6s plus tard, bien apres que le run entier ait ete declare
+    COMPLETED. Confirme empiriquement que meme appeler taskkill /T APRES
+    coup (une fois le process direct deja sorti) echoue aussi avec
+    "processus introuvable" (meme code 128 que le cas proc.kill()-avant
+    deja documente ci-dessus) -- ce n'est donc PAS un probleme de timing
+    de detection, mais une limite structurelle : taskkill ne peut agir que
+    sur un PID encore present dans la table des process Windows. Voir
+    _ProcessSupervisor plus bas (Job Object, ctypes, sans dependance
+    supplementaire) pour le vrai correctif : contrairement a taskkill, un
+    Job Object Windows peut etre termine a TOUT moment, meme apres la
+    sortie du process racine qui y a ete assigne, et tue alors tous les
+    membres du job encore vivants (y compris les petits-fils detaches,
+    tant qu'ils n'ont pas explicitement "breakaway" -- jamais autorise
+    ici)."""
     if os.name == "nt":
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -65,6 +90,124 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
     except Exception:
         pass
+
+
+# [AJOUTE 21/10/2026 -- voir le commentaire de _kill_tree ci-dessus pour le
+# bug reel et sa reproduction] Job Object Windows (ctypes, zero dependance
+# supplementaire, coherent avec "aucun package externe n'est requis") :
+# contrairement a taskkill /T (qui ne peut agir que sur un PID encore
+# present dans la table des process au moment de l'appel), un Job Object
+# peut etre termine a N'IMPORTE QUEL moment -- meme longtemps apres que le
+# process racine qui y a ete assigne ait deja quitte normalement -- et tue
+# alors tous les membres du job encore vivants. Teste en vrai (script
+# jetable) : process direct qui lance un petit-fils detache puis quitte en
+# 0.1s, TerminateJobObject() appele APRES cette sortie tue quand meme le
+# petit-fils (temoin disque absent 7s plus tard), alors que la meme
+# sequence avec taskkill a la place echoue avec "processus introuvable".
+# Limite residuelle documentee honnetement : il existe une fenetre
+# theorique, entre le Popen() et l'appel a AssignProcessToJobObject(),
+# pendant laquelle un enfant deja lance par le code approuve POURRAIT
+# echapper au job si il est cree dans cette fenetre -- fermer cette
+# fenetre completement demanderait de creer le process SUSPENDU
+# (CREATE_SUSPENDED) et de ne reprendre son thread principal qu'APRES
+# l'assignation, ce que subprocess.Popen n'expose pas directement. En
+# pratique cette fenetre est de l'ordre du microseconde (bien avant que le
+# code Python de l'utilisateur ait meme commence a s'executer), largement
+# suffisante pour l'attaque demontree (lancer un arriere-plan puis
+# quitter), mais n'est pas une garantie absolue contre un adversaire qui
+# chercherait specifiquement a gagner cette course.
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_PROCESS_SET_QUOTA_AND_TERMINATE = 0x0001 | 0x0100
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_ulonglong) for name in (
+        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32), ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation), ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _start_descendant_supervision(proc: subprocess.Popen) -> Callable[[], None]:
+    """Supervise les DESCENDANTS de `proc`, pas seulement `proc` lui-même,
+    pour qu'ils puissent être terminés même après que `proc` ait déjà
+    quitté normalement (voir les commentaires ci-dessus). Retourne une
+    fonction de nettoyage à appeler SANS CONDITION à la fin de
+    _run_capped, quel que soit le chemin de sortie (succès, timeout,
+    annulation) -- best-effort : si la mise en place échoue (droits,
+    plateforme inattendue), retourne un no-op plutôt que de faire planter
+    l'appel d'outil pour une protection en profondeur optionnelle."""
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return lambda: None
+            info = _JobObjectExtendedLimitInformation()
+            info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                                                     ctypes.byref(info), ctypes.sizeof(info)):
+                kernel32.CloseHandle(job)
+                return lambda: None
+            process_handle = kernel32.OpenProcess(_PROCESS_SET_QUOTA_AND_TERMINATE, False, proc.pid)
+            if not process_handle or not kernel32.AssignProcessToJobObject(job, process_handle):
+                kernel32.CloseHandle(job)
+                if process_handle:
+                    kernel32.CloseHandle(process_handle)
+                return lambda: None
+
+            def _cleanup_windows() -> None:
+                try:
+                    kernel32.TerminateJobObject(job, 1)
+                except Exception:
+                    pass
+                try:
+                    kernel32.CloseHandle(process_handle)
+                    kernel32.CloseHandle(job)
+                except Exception:
+                    pass
+
+            return _cleanup_windows
+        except Exception:
+            return lambda: None
+    # POSIX : nécessite que le process ait été lancé avec
+    # start_new_session=True (voir _run_capped), ce qui en fait le chef
+    # de groupe -- son pgid est alors toujours égal à son pid, une valeur
+    # qu'on possède déjà sans avoir besoin de la relire plus tard (une
+    # relecture via os.getpgid(pid) échouerait avec ProcessLookupError
+    # une fois `proc` sorti, exactement la même course que taskkill sous
+    # Windows). os.killpg() avec ce pgid tue tout le groupe -- y compris
+    # les petits-fils qui n'ont pas créé leur propre session -- même après
+    # la sortie du chef de groupe, tant qu'il reste au moins un membre
+    # vivant dans le groupe.
+    pgid = proc.pid
+
+    def _cleanup_posix() -> None:
+        import signal
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except Exception:
+            pass
+
+    return _cleanup_posix
 
 
 def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, str] | None = None,
@@ -84,57 +227,80 @@ def _run_capped(args: list[str], *, cwd: Path, timeout: float, env: dict[str, st
     bornée, pas seulement le texte final affiché.
     """
     try:
+        # [AJOUTE 21/10/2026 -- voir _kill_tree/_start_descendant_supervision
+        # plus haut pour le bug reel et sa reproduction] start_new_session=True
+        # (POSIX uniquement -- leve ValueError sur Windows si passe True) fait
+        # du process lance le chef d'un NOUVEAU groupe de process, dont le pgid
+        # est alors egal a son pid -- une valeur qu'on connait deja et qui
+        # reste valable pour os.killpg() meme apres sa sortie, condition
+        # necessaire a la supervision des descendants ci-dessous.
         proc = subprocess.Popen(args, cwd=cwd, env=env, shell=shell, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                start_new_session=(os.name != "nt"))
     except FileNotFoundError as exc:
         return {"exit_code": None, "stdout": "", "stderr": "", "timed_out": False, "error": str(exc)}
-    buffers: dict[str, str] = {"stdout": "", "stderr": ""}
-    overflowed = {"stdout": False, "stderr": False}
-
-    def _drain(stream, key: str, cap: int) -> None:
-        try:
-            for chunk in iter(lambda: stream.read(4096), ""):
-                buffers[key] += chunk
-                if len(buffers[key]) > cap:
-                    buffers[key] = buffers[key][-cap:]
-                    overflowed[key] = True
-                    _kill_tree(proc)
-                    break
-        except Exception:
-            pass
-
-    readers = [Thread(target=_drain, args=(proc.stdout, "stdout", max_stdout), daemon=True),
-              Thread(target=_drain, args=(proc.stderr, "stderr", max_stderr), daemon=True)]
-    for reader in readers:
-        reader.start()
-    # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
-    # PolicyEngine.stop() positionnait kill_switch (bool) mais rien n'avait
-    # de prise sur un sous-processus DÉJÀ lancé -- il tournait jusqu'à son
-    # propre timeout, kill switch ou pas. Un watchdog séparé attend le
-    # cancel_event (threading.Event, observable depuis un autre thread,
-    # contrairement au bool) et tue le process dès qu'il se déclenche, sans
-    # attendre le timeout normal.
-    cancelled = {"flag": False}
-    if cancel_event is not None:
-        def _watch_cancel() -> None:
-            if cancel_event.wait(timeout=timeout):
-                cancelled["flag"] = True
-                _kill_tree(proc)
-        Thread(target=_watch_cancel, daemon=True).start()
+    # [AJOUTE 21/10/2026 -- bug reel trouve par un agent puis verifie en
+    # vrai (voir _kill_tree ci-dessus) : ni le timeout, ni le plafond de
+    # sortie, ni le cancel_event (kill switch) n'avaient de prise sur un
+    # DESCENDANT du process trace qui survit a la sortie NORMALE et RAPIDE
+    # de ce dernier -- aucun de ces trois mecanismes ne se declenche dans
+    # ce cas, donc _kill_tree() n'etait jamais appelee du tout. La
+    # supervision ci-dessous est INDEPENDANTE des trois (elle ne remplace
+    # aucun des `_kill_tree()` existants plus bas, qui restent necessaires
+    # pour tuer le process RACINE lui-meme pendant un timeout/annulation) ;
+    # son seul role est de nettoyer tout ce qu'il a pu laisser tourner,
+    # systematiquement, quel que soit le chemin de sortie.
+    cleanup_descendants = _start_descendant_supervision(proc)
     try:
-        proc.wait(timeout=timeout)
-        timed_out = False
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc)
-        proc.wait()
-        timed_out = True
-    for reader in readers:
-        reader.join(timeout=5)
-    proc.stdout.close()
-    proc.stderr.close()
-    return {"exit_code": None if (timed_out or cancelled["flag"]) else proc.returncode, "stdout": buffers["stdout"],
-           "stderr": buffers["stderr"], "timed_out": timed_out, "cancelled": cancelled["flag"],
-           "output_truncated": overflowed["stdout"] or overflowed["stderr"]}
+        buffers: dict[str, str] = {"stdout": "", "stderr": ""}
+        overflowed = {"stdout": False, "stderr": False}
+
+        def _drain(stream, key: str, cap: int) -> None:
+            try:
+                for chunk in iter(lambda: stream.read(4096), ""):
+                    buffers[key] += chunk
+                    if len(buffers[key]) > cap:
+                        buffers[key] = buffers[key][-cap:]
+                        overflowed[key] = True
+                        _kill_tree(proc)
+                        break
+            except Exception:
+                pass
+
+        readers = [Thread(target=_drain, args=(proc.stdout, "stdout", max_stdout), daemon=True),
+                  Thread(target=_drain, args=(proc.stderr, "stderr", max_stderr), daemon=True)]
+        for reader in readers:
+            reader.start()
+        # [AJOUTÉ 19/10/2026 — faille réelle signalée par un audit externe]
+        # PolicyEngine.stop() positionnait kill_switch (bool) mais rien n'avait
+        # de prise sur un sous-processus DÉJÀ lancé -- il tournait jusqu'à son
+        # propre timeout, kill switch ou pas. Un watchdog séparé attend le
+        # cancel_event (threading.Event, observable depuis un autre thread,
+        # contrairement au bool) et tue le process dès qu'il se déclenche, sans
+        # attendre le timeout normal.
+        cancelled = {"flag": False}
+        if cancel_event is not None:
+            def _watch_cancel() -> None:
+                if cancel_event.wait(timeout=timeout):
+                    cancelled["flag"] = True
+                    _kill_tree(proc)
+            Thread(target=_watch_cancel, daemon=True).start()
+        try:
+            proc.wait(timeout=timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            proc.wait()
+            timed_out = True
+        for reader in readers:
+            reader.join(timeout=5)
+        proc.stdout.close()
+        proc.stderr.close()
+        return {"exit_code": None if (timed_out or cancelled["flag"]) else proc.returncode, "stdout": buffers["stdout"],
+               "stderr": buffers["stderr"], "timed_out": timed_out, "cancelled": cancelled["flag"],
+               "output_truncated": overflowed["stdout"] or overflowed["stderr"]}
+    finally:
+        cleanup_descendants()
 
 
 @dataclass(frozen=True)
